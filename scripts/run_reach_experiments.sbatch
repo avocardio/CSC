@@ -58,12 +58,12 @@ CUDA_VISIBLE_DEVICES=2 python rl/cl_experiment.py \
     --out results/cl_ewc_${TASKS}_s${SEED}.json \
     > results/ewc_${TASKS}_s${SEED}.log 2>&1 &
 
-# GPU 3: compression_replay
+# GPU 3: csc
 CUDA_VISIBLE_DEVICES=3 python rl/cl_experiment.py \
-    --method compression_replay --tasks $TASKS --steps_per_task $STEPS \
+    --method csc --tasks $TASKS --steps_per_task $STEPS \
     --n_envs $ENVS --seed $SEED \
-    --out results/cl_comp_replay_${TASKS}_s${SEED}.json \
-    > results/comp_replay_${TASKS}_s${SEED}.log 2>&1 &
+    --out results/cl_csc_${TASKS}_s${SEED}.json \
+    > results/csc_${TASKS}_s${SEED}.log 2>&1 &
 
 wait
 echo "All reach experiments done at $(date)"
@@ -90,10 +90,10 @@ for SEED2 in 1 2; do
         > results/ewc_${TASKS}_s${SEED2}.log 2>&1 &
 
     CUDA_VISIBLE_DEVICES=3 python rl/cl_experiment.py \
-        --method compression_replay --tasks $TASKS --steps_per_task $STEPS \
+        --method csc --tasks $TASKS --steps_per_task $STEPS \
         --n_envs $ENVS --seed $SEED2 \
-        --out results/cl_comp_replay_${TASKS}_s${SEED2}.json \
-        > results/comp_replay_${TASKS}_s${SEED2}.log 2>&1 &
+        --out results/cl_csc_${TASKS}_s${SEED2}.json \
+        > results/csc_${TASKS}_s${SEED2}.log 2>&1 &
 
     wait
     echo "Seed $SEED2 done at $(date)"
@@ -101,7 +101,7 @@ done
 
 echo ""
 echo "=== ALL RESULTS (3 seeds) ==="
-for method in finetune replay ewc comp_replay; do
+for method in finetune replay ewc csc; do
     echo "--- $method ---"
     for s in 42 1 2; do
         f="results/cl_${method}_${TASKS}_s${s}.json"

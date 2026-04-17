@@ -6,7 +6,7 @@ Runs a sequence of tasks, training SAC with various CL methods:
 - mas
 - replay
 - compression (ours)
-- compression_replay (ours full)
+- csc (ours full)
 
 Reports the standard continual RL metrics:
 - Average performance (final success across all tasks)
@@ -201,8 +201,8 @@ class SACAgentCL:
         self.cl_reg_coef = cl_reg_coef
         self.gamma_comp = gamma_comp
         self.grad_scale_beta = grad_scale_beta
-        self.use_compression = method in ('compression', 'compression_replay')
-        self.use_replay = method in ('replay', 'compression_replay')
+        self.use_compression = method in ('compression', 'csc')
+        self.use_replay = method in ('replay', 'csc')
         self.use_ewc = method == 'ewc'
 
         self.actor = Actor(use_compression=self.use_compression).to(device)
@@ -388,7 +388,7 @@ def train_cl(method, tasks, steps_per_task=200_000, n_envs=4096,
     """Run continual learning training over a sequence of tasks.
 
     Args:
-        method: 'finetune', 'ewc', 'replay', 'compression', 'compression_replay'
+        method: 'finetune', 'ewc', 'replay', 'compression', 'csc'
         tasks: list of task names (e.g., ['reach-front', 'reach-top', ...])
         steps_per_task: env steps per task
         n_envs: parallel envs (higher = faster data collection)
@@ -533,7 +533,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', type=str, default='finetune',
                         choices=['finetune', 'ewc', 'replay', 'compression',
-                                 'compression_replay'])
+                                 'csc'])
     parser.add_argument('--tasks', type=str, default='reach_cycle',
                         help='Task sequence: reach_cycle or comma-separated list')
     parser.add_argument('--steps_per_task', type=int, default=200_000)

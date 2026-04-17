@@ -1724,3 +1724,52 @@ positions AFTER physics relaxation (needed for tasks with default body positions
 Added ccd_iterations override to suppress collision detection warnings.
 
 NEXT: Tune comp_replay grad_scale_beta for better plasticity-stability balance.
+
+================================================================================
+CSCS CLARIDEN CLUSTER EXPERIMENTS (2026-04-17)
+================================================================================
+
+Setup:
+- Clariden: 1368 nodes x 4 NVIDIA GH200 120GB (97GB VRAM each)
+- Account: a0155, partition: normal (12h), debug (1.5h)
+- Code synced via git (https://github.com/avocardio/CSC, public)
+- Env: uenv prgenv-gnu/24.11:v2, python 3.12.5, torch 2.9.1, mujoco-warp 3.7.0
+
+BENCHMARK on GH200 (hammer physics, pure stepping):
+  nworld=   256:    43,807 sps
+  nworld=  1024:   147,902 sps
+  nworld=  4096:   381,761 sps
+  nworld=  8192:   514,411 sps
+  nworld= 16384:   626,419 sps
+  nworld=  4096 (ctrl, frame_skip=5): 74,740 control_sps
+  → 3x faster than RTX 4090 at same nworld
+  → Can scale to 16K+ envs with 97GB VRAM
+
+BUG FIX: MuJoCo Warp CCD margin — set all geom_margin to 0 for NATIVECCD compat.
+BUG FIX: Hardcoded XML paths replaced with dynamic metaworld.__file__ resolution.
+
+FAILED EXPERIMENT: cw_learnable (window, faucet, handle, peg) at n_envs=4096:
+  - 0% success on all methods after 200K steps
+  - GPU utilization only 10-18% despite 4096 envs
+  - Alpha collapsed to 0.001 (no exploration)
+  - Root cause: CW manipulation tasks need much longer training and/or
+    better reward shaping. Our simplified rewards don't provide enough signal.
+
+REACH_CYCLE on Clariden GH200 — 3 seeds x 4 methods (job 1878445):
+  n_envs=1024, 30K steps/task, UTD=0.25
+  Total wall time: 32 minutes (all 12 experiments)
+
+  Method         avg_perf (mean±std)    forgetting (mean±std)
+  Finetune       0.167 ± 0.118          0.667 ± 0.000
+  Replay         0.250 ± 0.000          0.444 ± 0.157
+  EWC            0.000 ± 0.000          0.333 ± 0.000
+  Comp+Replay    0.250 ± 0.000          0.222 ± 0.314   ← BEST
+
+  KEY RESULT: Comp+Replay has 3x less forgetting than Finetune (0.22 vs 0.67).
+  2 of 3 seeds achieved PERFECT retention (0.000 forgetting).
+  EWC completely breaks at λ=1e5 (over-regularizes, can't learn any task).
+  Replay is a solid middle-ground (0.444 forgetting).
+
+  CW manipulation tasks (window, faucet, handle, peg) did NOT work at n_envs=4096:
+  all 0% success after 200K steps. Reward shaping insufficient for GPU-batched SAC.
+  This is a known limitation — MetaWorld tasks need dense rewards + proper UTD.

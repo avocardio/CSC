@@ -465,7 +465,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', required=True,
                         choices=['finetune', 'ewc', 'ewc_replay', 'replay',
-                                 'compression_replay'])
+                                 'csc'])
     parser.add_argument('--steps_per_task', type=int, default=1_000_000)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--cl_reg_coef', type=float, default=1e4)

@@ -22,7 +22,7 @@ def main():
     parser.add_argument('--n_envs', type=int, default=128)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--methods', type=str,
-                        default='finetune,ewc,replay,compression,compression_replay')
+                        default='finetune,ewc,replay,compression,csc')
     args = parser.parse_args()
 
     if args.tasks == 'reach_cycle':

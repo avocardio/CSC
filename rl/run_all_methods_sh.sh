@@ -11,7 +11,7 @@ STEPS=${1:-30000}
 SEED=${2:-42}
 TASKS=${3:-reach_cycle}
 
-for method in finetune ewc replay compression compression_replay; do
+for method in finetune ewc replay compression csc; do
     echo ""
     echo "============================================"
     echo " METHOD: $method"

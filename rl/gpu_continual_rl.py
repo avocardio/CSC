@@ -4,7 +4,7 @@ Compares:
 - standard: SAC baseline (catastrophic forgetting)
 - replay: SAC + experience replay from past tasks
 - compression: compression-guided unit replacement + gradient scaling
-- compression_replay: full method (compression + replay)
+- csc: full method (compression + replay)
 """
 
 import os
@@ -535,8 +535,8 @@ def train(agent_type, tasks, steps_per_task, n_envs=64, device='cuda', seed=42,
     print(f"  obs_dim={obs_dim} (max, padded), act_dim={act_dim}")
     print(f"  Per-task obs dims: {task_obs_dims}")
 
-    use_compression = agent_type in ('compression', 'compression_replay')
-    use_replay = agent_type in ('replay', 'compression_replay', 'ewc_replay', 'mas_replay')
+    use_compression = agent_type in ('compression', 'csc')
+    use_replay = agent_type in ('replay', 'csc', 'ewc_replay', 'mas_replay')
     use_ewc = agent_type in ('ewc', 'ewc_replay')
     use_mas = agent_type in ('mas', 'mas_replay')
 
@@ -649,7 +649,7 @@ TASK_PRESETS = {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--agent', required=True,
-                        choices=['standard', 'replay', 'compression', 'compression_replay',
+                        choices=['standard', 'replay', 'compression', 'csc',
                                  'ewc', 'ewc_replay', 'mas', 'mas_replay'])
     parser.add_argument('--steps_per_task', type=int, default=500_000)
     parser.add_argument('--n_envs', type=int, default=64)

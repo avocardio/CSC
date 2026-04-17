@@ -57,10 +57,10 @@ CUDA_VISIBLE_DEVICES=2 python rl/cl_experiment.py \
     > results/ewc_${TASKS}_s${SEED}.log 2>&1 &
 
 CUDA_VISIBLE_DEVICES=3 python rl/cl_experiment.py \
-    --method compression_replay --tasks $TASKS --steps_per_task $STEPS \
+    --method csc --tasks $TASKS --steps_per_task $STEPS \
     --n_envs $ENVS --seed $SEED \
-    --out results/cl_comp_replay_${TASKS}_s${SEED}.json \
-    > results/comp_replay_${TASKS}_s${SEED}.log 2>&1 &
+    --out results/cl_csc_${TASKS}_s${SEED}.json \
+    > results/csc_${TASKS}_s${SEED}.log 2>&1 &
 
 wait
 
