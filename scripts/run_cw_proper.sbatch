@@ -76,17 +76,7 @@ echo ""
 echo "All CW experiments done at $(date)"
 echo "=== RESULTS ==="
 for method in finetune replay ewc csc; do
-    f="results/cw_${method}_s${SEED}.json"
     echo "--- $method ---"
-    if [ -f "$f" ]; then
-        python -c "
-import json
-d = json.load(open('$f'))
-m = d['metrics']
-print(f'  avg_perf={m[\"avg_performance\"]:.3f}  forget={m[\"avg_forgetting\"]:.3f}  bwt={m[\"backward_transfer\"]:.3f}  fwt={m[\"forward_transfer\"]:.3f}')
-" 2>/dev/null || echo "  (parse error)"
-    else
-        echo "  MISSING"
-    fi
+    tail -10 "results/cw_${method}_s${SEED}.log" 2>/dev/null || echo "  no log"
 done
 '
