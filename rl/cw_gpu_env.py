@@ -299,7 +299,7 @@ class CWGPUEnvBase:
 
         info = {
             'success': success.float(),
-            'success_once': self.success_once.float(),
+            'success_once': self.success_once.float().clone(),  # clone to survive reset_done
             'ep_return': self.ep_return.clone(),
         }
         return obs, reward, done, info

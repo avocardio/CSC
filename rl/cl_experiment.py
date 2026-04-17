@@ -366,12 +366,20 @@ class SACAgentCL:
 # Evaluate on a task (deterministic)
 # ========================================================================
 @torch.no_grad()
-def evaluate_task(agent, task_name, n_eval_envs=16):
+def evaluate_task(agent, task_name, n_eval_envs=16, stochastic=True):
+    """Evaluate on task using stochastic policy (CW paper convention).
+
+    Runs n_eval_envs episodes of MAX_EP_LEN steps each.
+    Returns fraction of episodes with at least one success.
+    """
     eval_env = make_env(task_name, n_envs=n_eval_envs)
     obs = eval_env.reset()
     success = torch.zeros(n_eval_envs, device=agent.device)
     for _ in range(MAX_EP_LEN):
-        action = agent.actor.act_deterministic(obs)
+        if stochastic:
+            action = agent.actor.act(obs)  # stochastic (CW paper default)
+        else:
+            action = agent.actor.act_deterministic(obs)
         obs, _, done, info = eval_env.auto_reset_step(action)
         success = torch.max(success, info['success_once'].float())
     result = success.mean().item()
