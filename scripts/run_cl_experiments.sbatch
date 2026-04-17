@@ -28,60 +28,52 @@ export TRITON_CACHE_DIR=/capstor/scratch/cscs/$USER/CSC/.cache/triton
 mkdir -p "$TORCH_HOME" "$TRITON_CACHE_DIR"
 mkdir -p results
 
+TASKS=cw_learnable
+STEPS=200000
+ENVS=4096
+SEED=42
+
 echo "Starting CL experiments at $(date)"
 echo "Node: $(hostname), GPUs: $(nvidia-smi -L | wc -l)"
+echo "Config: tasks=$TASKS steps=$STEPS n_envs=$ENVS seed=$SEED"
 
 # Run 4 experiments in parallel, one per GPU
-# GPU 0: finetune (baseline)
 CUDA_VISIBLE_DEVICES=0 python rl/cl_experiment.py \
-    --method finetune \
-    --tasks cw_subset \
-    --steps_per_task 50000 \
-    --n_envs 64 \
-    --seed 42 \
-    --out results/cl_finetune_cw_s42.json \
-    > results/finetune_s42.log 2>&1 &
+    --method finetune --tasks $TASKS --steps_per_task $STEPS \
+    --n_envs $ENVS --seed $SEED \
+    --out results/cl_finetune_${TASKS}_s${SEED}.json \
+    > results/finetune_${TASKS}_s${SEED}.log 2>&1 &
 
-# GPU 1: replay
 CUDA_VISIBLE_DEVICES=1 python rl/cl_experiment.py \
-    --method replay \
-    --tasks cw_subset \
-    --steps_per_task 50000 \
-    --n_envs 64 \
-    --seed 42 \
-    --out results/cl_replay_cw_s42.json \
-    > results/replay_s42.log 2>&1 &
+    --method replay --tasks $TASKS --steps_per_task $STEPS \
+    --n_envs $ENVS --seed $SEED \
+    --out results/cl_replay_${TASKS}_s${SEED}.json \
+    > results/replay_${TASKS}_s${SEED}.log 2>&1 &
 
-# GPU 2: ewc
 CUDA_VISIBLE_DEVICES=2 python rl/cl_experiment.py \
-    --method ewc \
-    --tasks cw_subset \
-    --steps_per_task 50000 \
-    --n_envs 64 \
-    --seed 42 \
-    --out results/cl_ewc_cw_s42.json \
-    > results/ewc_s42.log 2>&1 &
+    --method ewc --tasks $TASKS --steps_per_task $STEPS \
+    --n_envs $ENVS --seed $SEED \
+    --out results/cl_ewc_${TASKS}_s${SEED}.json \
+    > results/ewc_${TASKS}_s${SEED}.log 2>&1 &
 
-# GPU 3: compression_replay (ours)
 CUDA_VISIBLE_DEVICES=3 python rl/cl_experiment.py \
-    --method compression_replay \
-    --tasks cw_subset \
-    --steps_per_task 50000 \
-    --n_envs 64 \
-    --seed 42 \
-    --out results/cl_comp_replay_cw_s42.json \
-    > results/comp_replay_s42.log 2>&1 &
+    --method compression_replay --tasks $TASKS --steps_per_task $STEPS \
+    --n_envs $ENVS --seed $SEED \
+    --out results/cl_comp_replay_${TASKS}_s${SEED}.json \
+    > results/comp_replay_${TASKS}_s${SEED}.log 2>&1 &
 
-# Wait for all
 wait
 
 echo "All experiments done at $(date)"
+echo ""
 echo "=== RESULTS ==="
-for f in results/cl_*_cw_s42.json; do
-    method=$(basename $f | sed "s/cl_\(.*\)_cw_s42.json/\1/")
+for f in results/cl_*_${TASKS}_s${SEED}.json; do
+    method=$(basename $f | sed "s/cl_\(.*\)_${TASKS}_s${SEED}.json/\1/")
     if [ -f "$f" ]; then
         echo "--- $method ---"
         python -c "import json; d=json.load(open(\"$f\")); m=d[\"metrics\"]; print(f\"  avg_perf={m[\"avg_performance\"]:.3f}  forget={m[\"avg_forgetting\"]:.3f}  bwt={m[\"backward_transfer\"]:.3f}  fwt={m[\"forward_transfer\"]:.3f}\")"
+    else
+        echo "--- $method --- MISSING"
     fi
 done
 '

@@ -189,7 +189,7 @@ class Critic(nn.Module):
 # ========================================================================
 class SACAgentCL:
     def __init__(self, method='finetune', lr=3e-4, gamma=0.99, tau=0.005,
-                 batch_size=256, replay_ratio=0.25, cl_reg_coef=1e5,
+                 batch_size=2048, replay_ratio=0.25, cl_reg_coef=1e5,
                  gamma_comp=0.01, grad_scale_beta=1.0,
                  device='cuda:0'):
         self.device = device
@@ -383,8 +383,8 @@ def evaluate_task(agent, task_name, n_eval_envs=16):
 # ========================================================================
 # Main training loop
 # ========================================================================
-def train_cl(method, tasks, steps_per_task=30_000, n_envs=64,
-             start_steps=1000, update_freq=1.0, seed=42):
+def train_cl(method, tasks, steps_per_task=200_000, n_envs=4096,
+             start_steps=4096, update_freq=0.25, seed=42):
     """Run continual learning training over a sequence of tasks.
 
     Args:
@@ -398,7 +398,7 @@ def train_cl(method, tasks, steps_per_task=30_000, n_envs=64,
     np.random.seed(seed)
 
     agent = SACAgentCL(method=method)
-    buffer = ReplayBuffer(capacity=200_000)
+    buffer = ReplayBuffer(capacity=500_000)
 
     # Logged data: matrix[task_i_trained, task_j_evaluated] = success rate
     # plus learning curves
@@ -536,8 +536,8 @@ def main():
                                  'compression_replay'])
     parser.add_argument('--tasks', type=str, default='reach_cycle',
                         help='Task sequence: reach_cycle or comma-separated list')
-    parser.add_argument('--steps_per_task', type=int, default=30_000)
-    parser.add_argument('--n_envs', type=int, default=64)
+    parser.add_argument('--steps_per_task', type=int, default=200_000)
+    parser.add_argument('--n_envs', type=int, default=4096)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--out', type=str, default='cl_result.json')
     args = parser.parse_args()
@@ -548,8 +548,11 @@ def main():
         tasks = ['reach-front', 'reach-top', 'reach-left', 'reach-right',
                  'reach-front', 'reach-top', 'reach-left', 'reach-right']
     elif args.tasks == 'cw_subset':
-        # Subset of real CW tasks that run on our GPU port
         tasks = ['push', 'window-close', 'faucet-close', 'handle-press-side']
+    elif args.tasks == 'cw_learnable':
+        # Tasks that actually learn within budget (no push — needs 200K+)
+        tasks = ['window-close', 'faucet-close', 'handle-press-side',
+                 'peg-unplug-side']
     elif args.tasks == 'cw_full':
         tasks = ['hammer', 'push-wall', 'faucet-close', 'push-back',
                  'handle-press-side', 'push', 'window-close']
