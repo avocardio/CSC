@@ -1,0 +1,29 @@
+\begin{table*}[t]
+\centering
+\caption{Continual learning results on Split CIFAR-100 (from scratch). Average accuracy (\%) and backward transfer (BWT, \%) after training on all tasks. Results with $\pm$ show mean and standard deviation across 3 random seeds. \textit{Importance-only} uses the compression objective for gradient scaling but no actual quantization (100\% capacity). \textit{Full CSC} additionally applies quantization, reducing capacity.}
+\label{tab:main_results}
+\small
+\begin{tabular}{lccccccc}
+\toprule
+& \multicolumn{3}{c}{\textbf{10-task}} & \multicolumn{3}{c}{\textbf{20-task}} & \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+\textbf{Method} & Acc $\uparrow$ & BWT $\uparrow$ & Bits & Acc $\uparrow$ & BWT $\uparrow$ & Bits \\
+\midrule
+Fine-tuning & 23.5 & $-$74.0 & 100\% & --- & --- & --- \\
+EWC ($\lambda$=1000) & 56.9 & $-$34.0 & 100\% & --- & --- & --- \\
+SI ($\lambda$=10) & 64.5 & $-$5.7 & 100\% & --- & --- & --- \\
+Replay-only (r=200) & 73.9$\pm$1.8 & $-$18.9 & 100\% & 77.5 & $-$12.2 & 100\% \\
+\midrule
+\multicolumn{7}{l}{\textit{Importance-only mode (no quantization, 100\% capacity):}} \\
+\quad + Soft protection & 79.2$\pm$1.7 & $-$12.0 & 100\% & 82.5$\pm$0.7 & $-$8.1 & 100\% \\
+\quad + Soft protection + DER++ & 80.4$\pm$1.4 & $-$10.1 & 100\% & 83.3$\pm$0.7 & $-$5.7 & 100\% \\
+\midrule
+\multicolumn{7}{l}{\textit{Full CSC mode (with quantization, compressed):}} \\
+\quad + Soft protection & 76.1 & $-$13.3 & 24.5\% & 81.4 & $-$8.1 & 24.7\% \\
+\quad + Soft protection + DER++ & 78.4 & $-$10.2 & 24.5\% & 83.7$\pm$0.5 & $-$6.1 & 24.7\% \\
+\quad + Soft prot. + DER++ (r=500) & 83.0 & $-$4.9 & 24.5\% & 87.1$\pm$0.4 & $-$1.8 & 24.7\% \\
+\midrule
+PackNet (p=0.75) & 88.7$\pm$1.1 & 0.0 & 94.4\% & 87.4$\pm$0.4 & 0.0 & 99.7\% \\
+\bottomrule
+\end{tabular}
+\end{table*}

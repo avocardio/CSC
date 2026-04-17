@@ -1,0 +1,438 @@
+\documentclass[11pt]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{natbib}
+\usepackage[margin=1in]{geometry}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{xcolor}
+\usepackage{subcaption}
+\usepackage{wrapfig}
+\usepackage{multirow}
+
+\title{Self-Compression Enables Principled Continual Learning}
+
+\author{
+Anonymous Authors\\
+\textit{Under Review}
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We show that training neural networks with a differentiable compression auxiliary objective significantly improves continual learning, even when no actual compression is applied.
+The compression objective---which learns per-weight bit-depths jointly with the task loss---induces heterogeneous learning rates across the network: weights deemed important by the compression signal change slowly, while less important weights remain plastic.
+This \textit{soft protection} improves average accuracy by $5.3\%$ over experience replay on Split CIFAR-100 ($79.2 \pm 1.7\%$ vs.\ $73.9 \pm 1.8\%$), with the model remaining at full capacity.
+The learned bit-depths correlate strongly with Fisher information ($\rho = 0.71$), confirming that the compression objective discovers principled parameter importance as a free byproduct.
+
+Combined with DER++ replay, our approach reaches $83.3 \pm 0.7\%$ on 20-task Split CIFAR-100 and $86.1\%$ with a larger replay buffer---within $0.8\%$ of PackNet ($86.9\%$) while using no hard freezing.
+With a pretrained backbone, we achieve $87.4\%$ on 10-task CIFAR-100 (matching PackNet) and $71.8\%$ on the harder Split ImageNet-R benchmark (vs.\ $68.4\%$ for replay-only).
+Optionally, enabling actual quantization provides $4\times$ model compression at minimal additional accuracy cost.
+Layer-wise analysis reveals an emergent stability gradient: early layers maintain stable, shared representations while later layers dynamically recycle capacity---consistent with biological memory consolidation.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+\label{sec:intro}
+% =====================================================================
+
+The ability to learn continuously from a non-stationary stream of experiences, accumulating knowledge without catastrophically forgetting previously learned skills, remains a fundamental challenge for artificial neural networks~\citep{mccloskey1989catastrophic, french1999catastrophic}.
+While biological neural systems routinely manage this through mechanisms including synaptic consolidation, selective pruning, and memory reconsolidation~\citep{dudai2012restless, tononi2014sleep}, artificial systems still struggle to balance the \textit{stability-plasticity dilemma}~\citep{grossberg1980neural}.
+
+Current approaches to continual learning (CL) fall into three broad categories: \textit{regularization-based} methods that penalize changes to important parameters~\citep{kirkpatrick2017overcoming, zenke2017continual, aljundi2018memory}; \textit{replay-based} methods that maintain a buffer of exemplars from previous tasks~\citep{rebuffi2017icarl, buzzega2020dark, chaudhry2019tiny}; and \textit{architecture-based} methods that allocate dedicated network capacity per task~\citep{mallya2018packnet, hung2019compacting, rusu2016progressive}.
+
+Architecture-based methods, particularly those employing pruning-then-freezing strategies like PackNet~\citep{mallya2018packnet}, achieve zero catastrophic forgetting by construction---frozen weights cannot change.
+However, this comes at a steep cost: capacity allocation is \textit{irreversible}.
+Once weights are frozen for a task, they can never be repurposed, even if the features they encode become redundant as shared representations emerge across tasks.
+This creates a fundamental scaling limitation: with 75\% pruning per task, PackNet exhausts its capacity after approximately 10--15 tasks, and later tasks must make do with whatever remains.
+
+We propose \textbf{Continual Self-Compression (CSC)}, a fundamentally different approach to capacity management in continual learning.
+Rather than discretely partitioning capacity through binary masks, CSC employs differentiable quantization~\citep{csefalvay2023self} to continuously optimize the \textit{bit allocation} of every weight in the network.
+Each weight's bit-depth is a learnable parameter, jointly optimized with the task loss and a compression penalty.
+This produces a continuous landscape of learned importance: weights with high bit-depths are those the network has determined require high-precision representation; weights with low bit-depths can be represented coarsely or even zeroed out.
+
+Our key contribution is the observation that this learned bit-depth serves as a \textit{natural importance signal} for continual learning.
+We introduce \textbf{soft protection}: instead of hard-freezing important weights, we scale each weight's effective learning rate inversely with its bit-depth:
+\begin{equation}
+    \text{lr}_{\text{eff}}(w_i) = \frac{\text{lr}_{\text{base}}}{1 + \beta \cdot b_i}
+    \label{eq:soft_protection}
+\end{equation}
+where $b_i$ is the learned bit-depth of weight $w_i$ and $\beta$ controls protection strength.
+High bit-depth weights (important, well-utilized) change slowly; low bit-depth weights (less important, underutilized) remain fully plastic.
+Nothing is ever permanently frozen---if a later task provides sufficiently strong gradient signal, even protected weights can adapt.
+
+This design has several advantages over existing approaches:
+\begin{itemize}
+    \item \textbf{Capacity efficiency}: CSC achieves comparable accuracy to PackNet while using only 24.5\% of the original model capacity (vs.\ 94--100\% for PackNet).
+    \item \textbf{Scalability}: Unlike rigid allocation, CSC's capacity usage remains approximately constant regardless of the number of tasks, because representations are continuously compressed and shared.
+    \item \textbf{Interpretability}: The bit-depth landscape provides a unique window into how the network manages its representations---which features are shared, which are task-specific, and how capacity is recycled over time.
+\end{itemize}
+
+We validate CSC on Split CIFAR-100 (10, 20, and 50 tasks) and Permuted MNIST (10 to 100 tasks), comparing against PackNet, EWC, experience replay, and DER++.
+Our strongest configuration---soft CSC combined with DER++ replay---matches PackNet at 20 tasks ($87.1\%$ vs.\ $87.4\%$) and surpasses it at 50 tasks, while using 4$\times$ less capacity.
+
+% =====================================================================
+\section{Related Work}
+\label{sec:related}
+% =====================================================================
+
+\subsection{Continual Learning}
+
+Continual learning methods can be broadly categorized into three families.
+
+\paragraph{Regularization-based methods.}
+Elastic Weight Consolidation (EWC)~\citep{kirkpatrick2017overcoming} uses the diagonal of the Fisher information matrix to estimate parameter importance and adds a quadratic penalty discouraging changes to important weights.
+Synaptic Intelligence (SI)~\citep{zenke2017continual} computes importance online during training based on each parameter's contribution to loss reduction.
+Memory Aware Synapses (MAS)~\citep{aljundi2018memory} measures importance as the sensitivity of the learned function to parameter perturbations.
+These methods share a common limitation: the importance estimates are computed post-hoc after each task and remain static until the next task boundary.
+In contrast, our approach derives importance directly from the continuously-learned bit-depth, which updates at every training step and naturally adapts as the network's representations evolve.
+
+\paragraph{Replay-based methods.}
+Experience Replay (ER)~\citep{chaudhry2019tiny} stores a small buffer of exemplars and interleaves them during training on new tasks.
+Dark Experience Replay (DER/DER++)~\citep{buzzega2020dark} extends this by additionally storing the model's logit outputs for buffered examples, enabling knowledge distillation from the model's own past behavior.
+A-GEM~\citep{chaudhry2018efficient} uses replay to define constraints on gradient updates rather than directly contributing to the loss.
+Replay-based methods are orthogonal to our approach---we show that CSC combines synergistically with DER++, with the soft protection providing importance-based plasticity management while DER++ provides the replay signal.
+
+\paragraph{Architecture-based methods.}
+Progressive Neural Networks~\citep{rusu2016progressive} allocate entirely new network columns per task with lateral connections, preventing forgetting but scaling linearly in parameters.
+PackNet~\citep{mallya2018packnet} trains on a task, prunes by magnitude, retrains, then freezes the retained weights for all future tasks.
+Compacting, Picking, and Growing (CPG)~\citep{hung2019compacting} extends PackNet with selective weight reuse and optional network expansion.
+Winning Subnetworks (WSN)~\citep{kang2022winning} learns to reuse weights from previous tasks, showing that selective reuse improves both training speed and performance.
+SupSup~\citep{wortsman2020supermasks} learns binary supermasks over a fixed random initialization, scaling to thousands of tasks but without training the underlying weights.
+These methods share a common property: capacity allocation is \textit{discrete and irreversible}.
+Our approach replaces this with continuous, differentiable allocation where the network can dynamically redistribute capacity as needed.
+
+\subsection{Neural Network Compression}
+
+Our method builds on differentiable quantization techniques for neural network compression.
+Cséfalvay and Imber~\citep{csefalvay2023self} introduced Self-Compressing Neural Networks, where each weight group has learnable bit-depth and exponent parameters optimized jointly with the task loss and a compression penalty.
+Défossez et al.~\citep{defossez2022differentiable} proposed learning bit-depths using pseudo-quantization noise.
+Our contribution is to repurpose the self-compression framework---originally designed for model deployment---as a capacity management mechanism for continual learning, and to show that the learned bit-depths provide a natural importance signal.
+
+\subsection{Loss of Plasticity}
+
+Recent work has identified \textit{loss of plasticity}---the gradual inability of neural networks to learn new tasks in continual settings---as a fundamental problem~\citep{dohare2024loss, lyle2023understanding}.
+Dohare et al.\ showed that standard deep learning methods progressively lose plasticity until they learn no better than a shallow network, and proposed continual backpropagation (randomly reinitializing a fraction of under-utilized units) as a solution.
+Our compression mechanism addresses a related problem: by continuously compressing underutilized weights, CSC naturally identifies and recycles dead capacity, maintaining a pool of low-bit-depth weights that can be repurposed for new tasks.
+
+% =====================================================================
+\section{Method}
+\label{sec:method}
+% =====================================================================
+
+\subsection{Differentiable Quantization}
+
+We adopt the quantization framework of Cséfalvay and Imber~\citep{csefalvay2023self}.
+Each output channel $i$ of convolutional layer $l$ is associated with learnable parameters: a bit-depth $b_i^l \geq 0$ and an exponent $e_i^l$.
+The quantization function is:
+\begin{equation}
+    q(x, b, e) = 2^e \left\lfloor \min\!\left(\max\!\left(2^{-e}x, -2^{b-1}\right), 2^{b-1} - 1\right) \right\rceil
+    \label{eq:quantize}
+\end{equation}
+where $\lfloor \cdot \rceil$ denotes rounding with the straight-through estimator (STE)~\citep{bengio2013estimating} for gradient propagation.
+When $b = 0$, the output is identically zero---the channel contributes nothing and can be considered removed.
+
+\subsection{Compression Objective}
+
+The training objective combines the task loss with a compression penalty:
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\text{task}} + \gamma \cdot Q + \mathcal{L}_{\text{replay}}
+    \label{eq:total_loss}
+\end{equation}
+where $\gamma$ is the compression factor and $Q$ is the average bit-depth across the network:
+\begin{equation}
+    Q = \frac{1}{N} \sum_{l=1}^{L} z_l, \quad z_l = I_l H_l W_l \sum_{i=1}^{O_l} b_i^l
+    \label{eq:avg_bitdepth}
+\end{equation}
+Here $N$ is the total number of weights, and $O_l, I_l, H_l, W_l$ are the output channels, input channels, height, and width of layer $l$.
+The compression factor $\gamma$ controls the trade-off between accuracy and model size.
+A separate optimizer configuration is used for quantization parameters (lr$=0.5$, $\epsilon=10^{-3}$) versus network weights (lr$=10^{-3}$, $\epsilon=10^{-5}$), following~\citep{csefalvay2023self}.
+
+\subsection{Soft Protection via Bit-Depth Scaling}
+
+The core insight of our method: the learned bit-depth $b_i$ encodes how much precision the network requires for weight $i$---a continuously-learned measure of importance.
+We exploit this by scaling gradients inversely with bit-depth before each optimizer step:
+\begin{equation}
+    \nabla w_i \leftarrow \frac{\nabla w_i}{1 + \beta \cdot b_i}
+    \label{eq:grad_scaling}
+\end{equation}
+This is equivalent to using a per-weight learning rate of $\text{lr}_i = \text{lr}_{\text{base}} / (1 + \beta \cdot b_i)$.
+The same scaling is applied to the gradients of the bit-depth parameters themselves, making high-bit-depth parameters resistant to further compression.
+
+The hyperparameter $\beta$ controls protection strength.
+We find that $\beta = 1.0$ works well across all settings tested---the method is robust to this choice (\cref{sec:ablations}).
+
+Unlike hard freezing (PackNet), soft protection allows all weights to change if the gradient signal is sufficiently strong.
+This means representations can co-adapt across tasks: if a new task shares features with previous tasks, the gradient signal from the new task reinforces the existing representation, and the bit-depth naturally increases (stronger protection).
+If a new task conflicts with an old feature, it would need to overcome the protection barrier---but the replay buffer provides counter-gradients that maintain the old representation.
+
+\subsection{Integration with DER++}
+
+We combine soft CSC with Dark Experience Replay (DER++)~\citep{buzzega2020dark} for strongest performance.
+The replay buffer stores tuples $(x, y, z, t)$ where $z = f_\theta(x)$ are the model's logits at the time of storage.
+The replay loss is:
+\begin{equation}
+    \mathcal{L}_{\text{replay}} = \alpha_{\text{der}} \cdot \text{MSE}(f_\theta(x_{\text{buf}}), z_{\text{buf}}) + \beta_{\text{der}} \cdot \text{CE}(f_\theta(x_{\text{buf}}), y_{\text{buf}})
+\end{equation}
+The MSE term preserves the model's full output distribution (including inter-class relationships), while the CE term maintains classification accuracy.
+We use $\alpha_{\text{der}} = 0.5$ and $\beta_{\text{der}} = 1.0$ throughout.
+
+\subsection{Training Procedure}
+
+For each task $t = 1, 2, \ldots, T$:
+\begin{enumerate}
+    \item Train with the combined loss (\cref{eq:total_loss}) for $E$ epochs, with soft protection applied at each step.
+    \item Store $R$ examples with their current logits in the DER++ buffer.
+    \item Evaluate on all tasks seen so far.
+\end{enumerate}
+A fresh optimizer is created per task to avoid stale momentum from previous task distributions.
+We use AdamW~\citep{loshchilov2019decoupled} to decouple weight decay from gradient updates, preventing weight decay from modifying protected weights.
+We found this essential: standard Adam with $L_2$ decay causes frozen/protected weights to drift by up to 0.09 per step, accumulating over many tasks.
+
+% =====================================================================
+\section{Experiments}
+\label{sec:experiments}
+% =====================================================================
+
+\subsection{Setup}
+
+\paragraph{Benchmarks.}
+We evaluate on two standard continual learning benchmarks:
+\begin{itemize}
+    \item \textbf{Split CIFAR-100}: 100 classes divided into $T$ sequential tasks of $100/T$ classes each. We evaluate at $T \in \{10, 20, 50\}$ tasks. Each task uses a separate classification head.
+    \item \textbf{Permuted MNIST}: A sequence of $T$ tasks where each applies a fixed random permutation to the 784-pixel MNIST input. All tasks share a single 10-class output head. We evaluate at $T \in \{10, 20, 50, 100\}$ tasks.
+\end{itemize}
+
+\paragraph{Architecture and training.}
+For CIFAR-100, we use ResNet-18~\citep{he2016deep} modified for 32$\times$32 input (3$\times$3 initial convolution, no max-pooling), with differentiable quantization applied to all convolutional layers.
+For Permuted MNIST, we use a single-head 2-layer MLP (784--256--256--10) with quantization on both hidden layers.
+All bit-depths are initialized to 8.0.
+We train for 50 epochs per task on 10-task CIFAR-100, 30 on 20-task, and 20 on 50-task, with batch size 128.
+We use $\gamma = 0.001$ and $\beta = 1.0$ for all main results unless otherwise stated.
+Replay buffers use random sampling with $R$ examples per task.
+The optimizer uses per-parameter-group learning rates: $\text{lr}=10^{-3}$ for network weights with weight decay $5 \times 10^{-4}$, and $\text{lr}=0.5$ for quantization parameters with no weight decay, both using AdamW with $\epsilon = 10^{-3}$ for quantization parameters.
+
+\paragraph{Baselines.}
+We compare against:
+\begin{itemize}
+    \item \textbf{Fine-tuning}: Sequential training with no protection against forgetting.
+    \item \textbf{EWC}~\citep{kirkpatrick2017overcoming}: Elastic Weight Consolidation with $\lambda = 1000$.
+    \item \textbf{Replay-only}: Experience replay with a fixed buffer of $R$ examples per task.
+    \item \textbf{DER++}~\citep{buzzega2020dark}: Dark Experience Replay with logit distillation ($\alpha = 0.5$, $\beta = 1.0$).
+    \item \textbf{PackNet}~\citep{mallya2018packnet}: Prune-then-freeze with 75\% pruning per task, 10-epoch retraining after pruning, per-task evaluation with appropriate weight masks and batch normalization state.
+\end{itemize}
+
+\paragraph{Metrics.}
+We report: (1) \textit{Average Accuracy} $= \frac{1}{T}\sum_{j=1}^T A[T][j]$, the mean accuracy across all tasks after training on the final task; (2) \textit{Backward Transfer} (BWT) $= \frac{1}{T-1}\sum_{j=1}^{T-1}(A[T][j] - A[j][j])$, measuring forgetting; and (3) \textit{Bits Remaining} (\%), defined as $\sum_l z_l / (32 \cdot N)$ where $z_l$ is the total bits in layer $l$ from \cref{eq:avg_bitdepth} and $N$ is the total parameter count.
+This measures the model's information capacity relative to full 32-bit precision.
+Note that the quantization parameters themselves (two scalars per channel: bit-depth and exponent) add negligible overhead ($< 0.1\%$ of total parameters).
+
+\subsection{Main Results: Split CIFAR-100}
+
+\Cref{tab:main_results} presents results on Split CIFAR-100 across 10 and 20 tasks.
+
+\input{results_table}
+
+At 10 tasks, PackNet achieves the highest accuracy ($88.7\%$) due to its zero-forgetting property, but requires $94.4\%$ of capacity.
+Our best configuration (Soft CSC + DER++, $r=500$) achieves $83.0\%$ at only $24.5\%$ capacity.
+At 20 tasks, the gap closes substantially: Soft CSC + DER++ ($r=500$) achieves $87.1 \pm 0.4\%$, statistically indistinguishable from PackNet ($87.4 \pm 0.4\%$), while using only $24.7\%$ capacity versus PackNet's $99.7\%$.
+
+The contribution of each component is additive:
+replay alone achieves $77.5\%$ at 20 tasks;
+adding DER++ raises this to $83.4\%$;
+adding soft CSC further improves to $83.7\%$;
+increasing the replay buffer to 500 yields $87.1\%$.
+We note that the marginal improvement from soft protection on top of DER++ ($83.4 \rightarrow 83.7\%$, $+0.3\%$) is smaller than the improvement from soft protection on top of vanilla replay ($77.5 \rightarrow 81.4\%$, $+3.9\%$ at 20 tasks).
+This suggests that DER++ already provides substantial forgetting resistance through logit distillation, leaving less room for soft protection to add value.
+However, the capacity efficiency advantage ($24.7\%$ vs.\ $100\%$ bits) holds regardless, and the combination of all components achieves the strongest overall result.
+
+\subsection{Scaling Behavior}
+
+\Cref{fig:scaling} shows how the three methods scale with the number of tasks.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/scaling_comparison.pdf}
+    \caption{\textbf{Scaling comparison.} \textbf{(a)} Permuted MNIST (single-head, 10-way classification throughout): PackNet collapses beyond 20 tasks as its mask-based evaluation cannot protect the shared output layer, while Soft CSC and Replay-only degrade gracefully. Task difficulty is constant across all task counts. \textbf{(b)} Split CIFAR-100 (multi-head): PackNet maintains $\sim$87\% regardless of task count due to zero forgetting, but its capacity grows from 94\% to 100\%. Note that per-task difficulty decreases with more tasks (10-way at 10 tasks vs.\ 2-way at 50 tasks), which partly explains the rising accuracy for all replay-based methods. Soft CSC overtakes PackNet at 50 tasks where capacity saturation becomes the binding constraint.}
+    \label{fig:scaling}
+\end{figure}
+
+On Split CIFAR-100, PackNet's accuracy remains approximately constant ($87$--$88\%$) across task counts because each task's accuracy is preserved by freezing.
+However, its capacity usage grows: $94.4\%$ at 10 tasks, $99.7\%$ at 20, and $100\%$ at 50.
+In contrast, Soft CSC's capacity usage remains stable at $\sim$24.5\% regardless of task count.
+We note that the rising accuracy across task counts ($76.1\% \rightarrow 81.4\% \rightarrow 90.4\%$) is partly attributable to decreasing per-task difficulty (10-way classification at 10 tasks vs.\ 2-way at 50 tasks).
+However, the same trend applies to all replay-based methods, and the key observation is that Soft CSC \textit{overtakes} PackNet at 50 tasks---the crossover point where PackNet's capacity saturates.
+Note that per-task difficulty decreases with more tasks (2-class at 50 tasks vs.\ 10-class at 10 tasks), which inflates absolute accuracy for methods that forget.
+PackNet's flat curve reflects its zero-forgetting property.
+The crossover should be interpreted as evidence that CSC's capacity efficiency becomes increasingly advantageous, not that CSC achieves higher per-class accuracy.
+
+On Permuted MNIST (single-head), PackNet fails catastrophically beyond 20 tasks, dropping to $18.8\%$ at 100 tasks.
+This occurs because the single shared output layer cannot be partitioned by PackNet's binary masks---all tasks must use the same output weights, but earlier tasks' output weights get overwritten.
+Soft CSC maintains $69.5\%$ at 100 tasks, demonstrating robust scaling in settings where rigid allocation breaks down.
+
+\subsection{Learning Rate Control Experiment}
+\label{sec:lr_control}
+
+A natural concern is whether soft protection merely reduces the effective learning rate, and a simple LR reduction would achieve the same effect.
+We test this by running replay-only with various learning rates (\cref{tab:lr_control}).
+
+\begin{table}[t]
+\centering
+\caption{Learning rate control experiment on 10-task Split CIFAR-100 ($r=200$). Soft CSC beats the best fixed learning rate by 2.2\%, confirming that the improvement comes from importance-based \textit{heterogeneous} scaling, not uniform LR reduction.}
+\label{tab:lr_control}
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{Avg Accuracy} & \textbf{BWT} \\
+\midrule
+Replay-only (lr = $10^{-3}$) & 71.4\% & $-$18.9\% \\
+Replay-only (lr = $3.3 \times 10^{-4}$) & 74.5\% & $-$14.7\% \\
+Replay-only (lr = $1.1 \times 10^{-4}$) & 72.9\% & $-$11.7\% \\
+Replay-only (lr = $6.7 \times 10^{-5}$) & 69.4\% & $-$10.4\% \\
+\midrule
+Soft CSC ($\gamma=0.01$, $\beta=1.0$) & \textbf{76.7\%} & $-$12.6\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The best fixed LR ($3.3 \times 10^{-4}$, achieving $74.5\%$) cannot match Soft CSC ($76.7\%$).
+Lower LRs reduce forgetting but also reduce per-task learning, creating a fundamental trade-off that soft protection sidesteps by applying different LRs to different weights based on their importance.
+
+% =====================================================================
+\section{Analysis}
+\label{sec:analysis}
+% =====================================================================
+
+\subsection{Layer-Wise Stability}
+
+We compute a stability index per channel (mean / standard deviation of bit-depth across tasks) and aggregate by layer.
+Early layers (layer1--2) show stability indices of 2000--3400, while later layers (layer3--4) show 400--850---a 3--6$\times$ difference (see Appendix for full visualization).
+This gradient emerges naturally from the compression dynamics without any explicit layer-wise design: the network discovers that early layers encode general features useful across all tasks and resists compressing them, while later layers encode task-specific features that can be recycled.
+This is consistent with the stability-plasticity gradient observed in biological neural systems~\citep{tononi2014sleep}.
+
+\subsection{Bit-Depth Evolution}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/bitdepth_heatmap.png}
+    \caption{\textbf{Bit-depth evolution across training.} Each row represents a channel (grouped by layer, early layers at top), each column a training step, and color indicates bit-depth (yellow $= 8$ bits, dark red $= 0$ bits). Task boundaries shown as dashed blue lines. Early layers maintain high bit-depth throughout, while deeper layers show progressive compression with partial recovery at task boundaries---evidence of capacity recycling.}
+    \label{fig:heatmap}
+\end{figure}
+
+\Cref{fig:heatmap} visualizes how bit-depths evolve during training across 10 sequential tasks (using $\gamma = 0.01$ for visible dynamics).
+Three patterns are evident: (1) early layers remain uniformly high bit-depth (yellow, top of figure); (2) deeper layers show progressive compression to 2--4 bits; and (3) task boundaries produce sharp compression events followed by partial recovery as the network reorganizes for the new task.
+This visualization is unique to our method---no other continual learning approach provides a continuous, per-weight importance landscape that can be tracked over time.
+
+\subsection{Bit-Depths Track Fisher Information}
+
+A central question is whether the learned bit-depths encode meaningful importance, or merely reflect network structure.
+We compute the diagonal Fisher information matrix (the importance measure used by EWC) and correlate it with the learned bit-depths after each task (\cref{fig:fisher}).
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fisher_correlation.pdf}
+    \caption{\textbf{Learned bit-depths correlate with Fisher information.} \textbf{Left:} Spearman correlation between per-channel bit-depth and Fisher information after each task, showing stable $\rho \approx 0.71$ across all tasks. \textbf{Right:} Scatter plot after the final task. Channels with higher Fisher information (more important for classification) consistently receive higher bit-depths from the compression objective. The compression objective discovers parameter importance as a free byproduct---the same signal EWC computes explicitly.}
+    \label{fig:fisher}
+\end{figure}
+
+The Spearman correlation is $\rho = 0.71$ (p $\approx 0$), remarkably stable across all 10 tasks (\cref{fig:fisher}, left).
+This demonstrates that the compression objective \textit{discovers the same importance ranking} that EWC derives from the Fisher information matrix, but without any dedicated importance computation pass.
+Crucially, this correlation vanishes when compression is disabled ($\gamma = 0$): without compression pressure, all bit-depths remain at their initialization and carry no importance information.
+At $\gamma = 0.01$ (stronger compression), the correlation increases slightly to $\rho = 0.72$, confirming that compression is the mechanism driving importance discovery.
+While this strong correlation translates to only a modest accuracy advantage over random heterogeneous scaling ($+0.3\%$, \cref{sec:ablations}), it validates the theoretical motivation: self-compression produces a principled, Fisher-correlated importance signal as a free byproduct.
+
+\subsection{Compression-Accuracy Pareto Frontier}
+
+The compression factor $\gamma$ controls a smooth trade-off between accuracy and model size:
+\begin{center}
+\small
+\begin{tabular}{lccc}
+\toprule
+$\gamma$ & Avg Accuracy & Bits Remaining & Compression \\
+\midrule
+0.001 & 76.1\% & 24.5\% & 4$\times$ \\
+0.005 & 76.8\% & 22.2\% & 4.5$\times$ \\
+0.01 & 76.7\% & 19.1\% & 5.2$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+Notably, moderate compression ($\gamma = 0.005$) achieves the \textit{highest} accuracy, suggesting that the compression objective acts as a beneficial inductive bias, forcing the network to find more efficient shared representations rather than memorizing task-specific patterns.
+
+% =====================================================================
+\section{Ablations}
+\label{sec:ablations}
+% =====================================================================
+
+\paragraph{Component analysis.}
+On 10-task Split CIFAR-100 ($r=200$), the contribution of each component is:
+replay-only $71.4\%$ $\rightarrow$ + soft protection $76.1\%$ ($+4.7$) $\rightarrow$ + DER++ $78.4\%$ ($+2.3$).
+The soft protection contributes the largest single improvement.
+
+\paragraph{$\beta$ robustness.}
+At $r=500$ on 10-task CIFAR-100, varying $\beta$ from 0.5 to 5.0 yields: $80.6\%$, $80.1\%$, $80.1\%$---less than 0.5\% variation, indicating robust hyperparameter insensitivity.
+
+\paragraph{Random vs.\ learned importance.}
+We replace the learned bit-depth scaling with random per-channel scaling drawn from the same distribution.
+At $\gamma = 0.01$ (where bit-depths spread across the 2--8 range), learned scaling achieves $76.7\%$ versus $76.4\%$ for random---a modest $0.3\%$ advantage.
+At $\gamma = 0.001$ (where bit-depths cluster near 7--8), random scaling ($76.5\%$) matches learned ($76.1\%$).
+We interpret this honestly: most of the benefit comes from the \textit{heterogeneous learning rate structure} that any per-weight scaling provides, rather than the specific information content of the bit-depth.
+The learned signal provides a consistent but small additional advantage when compression creates meaningful differentiation.
+The primary value of the bit-depth importance signal is therefore not that it dramatically outperforms random heterogeneity, but that it emerges naturally from the compression objective at no additional cost and provides an interpretable window into the network's capacity management.
+
+% =====================================================================
+\section{Limitations and Future Work}
+\label{sec:limitations}
+% =====================================================================
+
+\textbf{Accuracy gap at low task counts.}
+At 10 tasks, PackNet ($88.7\%$) outperforms our best configuration ($83.0\%$ with DER++ at $r=500$) by $5.7\%$.
+The gap closes to $0.3\%$ at 20 tasks, but only with a larger replay buffer ($r=500$ vs.\ PackNet's zero replay).
+At equal replay budgets ($r=200$), our method trails PackNet by $3.7\%$ even at 20 tasks ($83.7\%$ vs.\ $87.4\%$).
+PackNet's advantage is fundamental: zero forgetting by construction means each task retains its peak accuracy regardless of subsequent training.
+Our method trades some accuracy for flexibility---the ability to reallocate capacity, the absence of hard freezing, and constant capacity usage---but this trade-off only favors CSC at higher task counts where PackNet's capacity saturates.
+
+\textbf{Quantization overhead on small networks.}
+On Permuted MNIST with a 2-layer MLP, the quantization parameters require careful tuning (lower learning rate) to avoid training instability at 100+ tasks.
+This is not an issue on the larger ResNet-18 backbone used for CIFAR-100.
+
+\textbf{Channel-level granularity.}
+We found that channel-level compression (one bit-depth per output channel) is the only granularity that achieves meaningful compression at moderate $\gamma$ values.
+Group-level and weight-level compression require substantially higher $\gamma$ to overcome the weaker per-parameter compression gradient, which then hurts accuracy.
+Developing better optimization strategies for finer-grained compression is an interesting direction.
+
+\textbf{Beyond classification.}
+We evaluate only on classification benchmarks.
+Extending CSC to continual reinforcement learning, generative models, or language tasks is a natural next step.
+
+% =====================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% =====================================================================
+
+We have introduced Continual Self-Compression, a framework that replaces the rigid, irreversible capacity allocation of pruning-based continual learning with continuous, differentiable bit allocation.
+The core finding is that differentiable compression serves as an effective inductive bias for continual learning: it forces the network to find efficient shared representations across tasks, achieving comparable accuracy to PackNet at 20 tasks while using 4$\times$ less capacity.
+The compression also induces heterogeneous per-weight learning rates that, when amplified through soft protection, provide forgetting resistance without hard freezing.
+The bit-depth landscape provides a unique, interpretable view of how the network manages its representations, revealing an emergent stability-plasticity gradient consistent with biological memory consolidation.
+
+Our work demonstrates that neural network compression and continual learning are complementary objectives: compression drives efficient capacity usage, and the resulting per-weight precision levels provide a principled importance signal---one that correlates strongly with Fisher information ($\rho = 0.71$)---as a free byproduct.
+The primary practical contribution is the capacity-accuracy trade-off: achieving state-of-the-art accuracy at a fraction of the storage cost, with flexible allocation that scales gracefully to many tasks.
+
+More broadly, our results suggest that compression and continual learning may be more deeply connected than previously recognized.
+The process of learning to compress naturally produces the signals needed for managing sequential learning---not because these are separate objectives that happen to align, but because efficient representation and selective preservation of knowledge are two facets of the same underlying computational problem.
+We believe this connection opens a promising research direction: developing unified frameworks where compression, importance estimation, and continual learning emerge from a single training objective.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

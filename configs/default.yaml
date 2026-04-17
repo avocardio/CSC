@@ -1,0 +1,47 @@
+# CSC Default Configuration
+# ========================
+
+# Model
+model:
+  granularity: "channel"  # channel, group, weight
+  group_size: 16
+  init_bit_depth: 8.0
+  num_classes_per_task: 10
+
+# Training - Single task (Phase 1)
+single_task:
+  epochs: 200
+  gamma: 0.01
+  lr_weights: 0.001
+  lr_quant: 0.5
+  eps_weights: 0.00001
+  eps_quant: 0.001
+  weight_decay: 0.0005
+  batch_size: 128
+  removal_interval: 50
+  bias_l1_weight: 0.01
+
+# Training - Continual learning
+continual:
+  num_tasks: 10
+  epochs_per_task: 50
+  gamma: 0.01
+  alpha: 1.0  # replay loss weight
+  lr_weights: 0.001
+  lr_quant: 0.5
+  eps_weights: 0.00001
+  eps_quant: 0.001
+  weight_decay: 0.0005
+  batch_size: 128
+  replay_per_task: 200
+  replay_batch_size: 64
+  removal_interval: 20
+  bias_l1_weight: 0.01
+
+# Data
+data:
+  cifar10_root: "/mnt/e/datasets/cifar10"
+  cifar100_root: "/mnt/e/datasets/cifar100"
+  mnist_root: "/mnt/e/datasets/mnist"
+  num_workers: 4
+  seed: 42
