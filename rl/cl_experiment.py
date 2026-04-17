@@ -204,6 +204,8 @@ class SACAgentCL:
         self.use_compression = method in ('compression', 'csc')
         self.use_replay = method in ('replay', 'csc')
         self.use_ewc = method == 'ewc'
+        self.use_packnet = method == 'packnet'
+        self._current_task = 0
 
         self.actor = Actor(use_compression=self.use_compression).to(device)
         self.critic = Critic().to(device)
@@ -231,6 +233,14 @@ class SACAgentCL:
         if self.use_ewc:
             self.ewc_fisher = {}
             self.ewc_params = {}
+        if self.use_packnet:
+            # Integer ownership tensor per kernel parameter (actor only)
+            self.pn_owner = {}
+            self.pn_freeze_bn = False  # freeze biases/LN after task 0
+            for n, p in self.actor.named_parameters():
+                if 'weight' in n and p.dim() == 2 and 'importance' not in n:
+                    self.pn_owner[n] = torch.zeros_like(p, dtype=torch.int32)
+            self.pn_retrain_steps = 25000  # 100K in CW paper but we use 250K/task
 
     @property
     def alpha(self):
@@ -284,6 +294,9 @@ class SACAgentCL:
         # Gradient scaling by accumulated importance (soft protection)
         if self.use_compression and self.grad_scale_beta > 0:
             self._scale_actor_grads()
+        # PackNet: zero gradients for weights owned by previous tasks
+        if self.use_packnet:
+            self._packnet_mask_grads()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=10.0)
         self.actor_opt.step()
         if self.use_compression:
@@ -311,28 +324,96 @@ class SACAgentCL:
             if layer.bias.grad is not None:
                 layer.bias.grad *= scale
 
-    def on_task_end(self, buffer):
+    def _packnet_mask_grads(self):
+        """Zero gradients for weights not owned by current task."""
+        if not self.use_packnet:
+            return
+        for n, p in self.actor.named_parameters():
+            if p.grad is None:
+                continue
+            if n in self.pn_owner:
+                # Only allow gradient for weights owned by current task
+                mask = (self.pn_owner[n] == self._current_task).float()
+                p.grad *= mask
+            elif self.pn_freeze_bn and ('bias' in n or 'ln' in n):
+                # Freeze biases and LayerNorm after task 0
+                p.grad.zero_()
+
+    def _packnet_prune(self, task_idx, n_tasks):
+        """Prune current task's weights by magnitude, free capacity for future."""
+        if not self.use_packnet:
+            return
+        tasks_left = n_tasks - task_idx - 1
+        if tasks_left <= 0:
+            return  # last task, no pruning needed
+        prune_perc = tasks_left / (tasks_left + 1)
+
+        with torch.no_grad():
+            for n, p in self.actor.named_parameters():
+                if n not in self.pn_owner:
+                    continue
+                owner = self.pn_owner[n]
+                # Get values owned by current task
+                mask = (owner == task_idx)
+                vals = p[mask].abs()
+                if vals.numel() == 0:
+                    continue
+                # Find threshold
+                k = int(vals.numel() * prune_perc)
+                if k == 0:
+                    continue
+                threshold = vals.sort()[0][k]
+                # Zero out pruned weights and transfer ownership
+                prune_mask = mask & (p.abs() <= threshold)
+                p[prune_mask] = 0.0
+                owner[prune_mask] = task_idx + 1  # give to next task
+
+        # Freeze biases/LN after task 0
+        if task_idx == 0:
+            self.pn_freeze_bn = True
+
+        print(f'    PackNet: pruned {prune_perc:.1%} of task {task_idx} weights')
+
+    def _packnet_retrain(self, buffer):
+        """Retrain after pruning with frozen pruned weights."""
+        if not self.use_packnet:
+            return
+        # Reset optimizer
+        self.actor_opt = torch.optim.Adam(
+            [p for n, p in self.actor.named_parameters() if 'importance' not in n],
+            lr=1e-3)
+        for _ in range(self.pn_retrain_steps):
+            self.update(buffer)
+        # Reset optimizer again
+        self.actor_opt = torch.optim.Adam(
+            [p for n, p in self.actor.named_parameters() if 'importance' not in n],
+            lr=1e-3)
+        print(f'    PackNet: retrained for {self.pn_retrain_steps} steps')
+
+    def on_task_end(self, buffer, task_idx=0, n_tasks=4):
         """Called after each task. Snapshot state for CL methods."""
         if self.use_replay:
             self.replay_store.add(buffer, n=5000)
         if self.use_compression:
-            # Snapshot importance (accumulate max across tasks)
             with torch.no_grad():
                 for i, imp in enumerate(self.actor.importance):
                     self.accumulated_importance[i] = torch.max(
                         self.accumulated_importance[i], imp.data.clamp(min=0))
         if self.use_ewc:
-            # Compute Fisher on last task's data
             self._compute_ewc_fisher(buffer)
+        if self.use_packnet:
+            self._packnet_prune(task_idx, n_tasks)
+            self._packnet_retrain(buffer)
 
     def on_task_start(self, task_idx):
         """Called at start of each new task. Reset alpha to encourage exploration."""
+        self._current_task = task_idx
         if task_idx > 0:
             # Reset log_alpha to restore exploration
             with torch.no_grad():
                 self.log_alpha.fill_(0.0)  # alpha = 1.0
             # Rebuild alpha optimizer to reset its state
-            self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=3e-4)
+            self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=1e-3)
 
     def _compute_ewc_fisher(self, buffer, n_batches=10, bs=256):
         params = [(n, p) for n, p in self.actor.named_parameters()
@@ -458,7 +539,7 @@ def train_cl(method, tasks, steps_per_task=1_000_000, n_envs=256,
                       f'alpha={agent.alpha:.3f}', flush=True)
 
         # End of task: snapshot for CL methods
-        agent.on_task_end(buffer)
+        agent.on_task_end(buffer, task_idx=task_idx, n_tasks=n)
 
         # Evaluate on ALL tasks (for eval matrix)
         print(f'  Evaluating on all {n} tasks...', flush=True)
@@ -541,7 +622,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', type=str, default='finetune',
                         choices=['finetune', 'ewc', 'replay', 'compression',
-                                 'csc'])
+                                 'csc', 'packnet'])
     parser.add_argument('--tasks', type=str, default='reach_cycle',
                         help='Task sequence: reach_cycle or comma-separated list')
     parser.add_argument('--steps_per_task', type=int, default=1_000_000)
