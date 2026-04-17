@@ -36,7 +36,7 @@ mkdir -p "$TORCH_HOME" "$TRITON_CACHE_DIR"
 mkdir -p results
 
 TASKS=cw_learnable
-STEPS=1000000
+STEPS=250000
 ENVS=256
 SEED=42
 
