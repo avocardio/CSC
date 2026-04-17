@@ -43,14 +43,10 @@ class ReachBaseEnv(CWGPUEnvBase):
         return self.HAND_INIT_POS.to(self.device)
 
     def _get_obj_obs(self) -> torch.Tensor:
-        # No real object for reach — zeros so obs doesn't leak target
-        zeros = torch.zeros(self.n_envs, 14, device=self.device)
-        return zeros
-
-    def _get_goal_obs(self) -> torch.Tensor:
-        # Hide goal from observation so tasks are structurally distinct
-        # Each task must learn its OWN policy without relying on goal inputs
-        return torch.zeros(self.n_envs, 3, device=self.device)
+        # Target position as "object" in obs — gives the agent goal information
+        target = self.target_pos
+        zeros = torch.zeros(self.n_envs, 11, device=self.device)
+        return torch.cat([target, zeros], dim=-1)
 
     def _randomize_state(self, idx: torch.Tensor):
         # No randomization — fixed target per task (simple)
