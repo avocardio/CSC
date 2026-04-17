@@ -16,6 +16,9 @@ mjm = mujoco.MjModel.from_xml_path(xml)
 for i in range(mjm.eq_data.shape[0]):
     if mjm.eq_type[i] == mujoco.mjtEq.mjEQ_WELD:
         mjm.eq_data[i] = np.array([0,0,0,0,0,0,-1,0,0,0,5.0])
+# Fix for MuJoCo Warp CCD: zero all geom margins
+for i in range(mjm.ngeom):
+    mjm.geom_margin[i] = 0.0
 
 wp.init()
 with wp.ScopedDevice('cuda:0'):
