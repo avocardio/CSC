@@ -37,7 +37,8 @@ ACTION_SCALE = 1.0 / 100.0
 MOCAP_LOW = torch.tensor([-0.2, 0.5, 0.06])
 MOCAP_HIGH = torch.tensor([0.2, 0.7, 0.6])
 
-METAWORLD_XML_DIR = '/home/maxi/.venvs/cuda/lib/python3.11/site-packages/metaworld/assets/sawyer_xyz'
+import metaworld as _mw
+METAWORLD_XML_DIR = os.path.join(os.path.dirname(_mw.__file__), 'assets', 'sawyer_xyz')
 
 
 class CWGPUEnvBase:

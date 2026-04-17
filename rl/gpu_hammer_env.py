@@ -18,7 +18,8 @@ import mujoco
 import warp as wp
 import mujoco_warp as mjw
 
-HAMMER_XML = '/home/maxi/.venvs/cuda/lib/python3.11/site-packages/metaworld/assets/sawyer_xyz/sawyer_hammer.xml'
+import metaworld as _mw
+HAMMER_XML = os.path.join(os.path.dirname(_mw.__file__), 'assets', 'sawyer_xyz', 'sawyer_hammer.xml')
 
 # Action/obs dims (matching MetaWorld)
 ACT_DIM = 4  # [dx, dy, dz, gripper]
