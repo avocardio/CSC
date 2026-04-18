@@ -214,7 +214,7 @@ class FastSACAgent:
     def __init__(self, method='finetune', lr=1e-3, gamma=0.99, tau=0.005,
                  batch_size=4096, replay_ratio=0.25,
                  gamma_comp=0.01, grad_scale_beta=1.0,
-                 policy_delay=1, device=DEVICE):
+                 policy_delay=1, fixed_alpha=None, device=DEVICE):
         self.device = device
         self.method = method
         self.gamma = gamma
@@ -224,6 +224,7 @@ class FastSACAgent:
         self.gamma_comp = gamma_comp
         self.grad_scale_beta = grad_scale_beta
         self.policy_delay = policy_delay
+        self.fixed_alpha = fixed_alpha
         self.use_compression = method == 'csc'
         self.use_replay = method in ('replay', 'csc')
 
@@ -255,6 +256,8 @@ class FastSACAgent:
 
     @property
     def alpha(self):
+        if self.fixed_alpha is not None:
+            return self.fixed_alpha
         return self.log_alpha.exp().item()
 
     def update(self, buffer):
@@ -272,7 +275,10 @@ class FastSACAgent:
         else:
             s, a, r, ns, d = buffer.sample(self.batch_size)
 
-        alpha = self.log_alpha.exp()
+        if self.fixed_alpha is not None:
+            alpha = self.fixed_alpha
+        else:
+            alpha = self.log_alpha.exp()
 
         # Critic update (always)
         with torch.no_grad():
@@ -291,7 +297,7 @@ class FastSACAgent:
         if self._update_counter % self.policy_delay == 0:
             na2, lp2 = self.actor.sample(s)
             q1n, q2n = self.critic(s, na2)
-            al = (alpha.detach() * lp2 - torch.min(q1n, q2n)).mean()
+            al = (alpha * lp2 - torch.min(q1n, q2n)).mean()
             if self.use_compression:
                 al = al + self.gamma_comp * self.actor.compression_loss()
             self.actor_opt.zero_grad(set_to_none=True)
@@ -304,13 +310,14 @@ class FastSACAgent:
             if self.use_compression:
                 self.imp_opt.step()
 
-            # Alpha (clipped to prevent instability with batched envs)
-            alpha_loss = -(self.log_alpha.exp() * (lp2 + self.target_entropy).detach()).mean()
-            self.alpha_opt.zero_grad(set_to_none=True)
-            alpha_loss.backward()
-            self.alpha_opt.step()
-            with torch.no_grad():
-                self.log_alpha.clamp_(-5.0, -1.6)  # alpha in [0.007, 0.2]
+            # Alpha update (skip if fixed)
+            if self.fixed_alpha is None:
+                alpha_loss = -(self.log_alpha.exp() * (lp2 + self.target_entropy).detach()).mean()
+                self.alpha_opt.zero_grad(set_to_none=True)
+                alpha_loss.backward()
+                self.alpha_opt.step()
+                with torch.no_grad():
+                    self.log_alpha.clamp_(-5.0, -1.6)  # alpha in [0.007, 0.2]
 
         # Target soft update (vectorized)
         with torch.no_grad():
@@ -330,7 +337,7 @@ class FastSACAgent:
 
     def on_task_start(self, task_idx):
         self._current_task = task_idx
-        if task_idx > 0:
+        if task_idx > 0 and self.fixed_alpha is None:
             with torch.no_grad():
                 self.log_alpha.fill_(-1.6)  # alpha=0.2 (within clamp range)
             self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=1e-3)
@@ -367,7 +374,8 @@ def evaluate_task(agent, task_name, n_eval_envs=16):
 # Training
 # ========================================================================
 def train_fast(method, tasks, steps_per_task=250_000, n_envs=1024,
-               grad_steps_per_collect=205, batch_size=512, seed=42):
+               grad_steps_per_collect=205, batch_size=512, seed=42,
+               fixed_alpha=None):
     """Fast CL training with low UTD and large batches.
 
     With n_envs=1024 and grad_steps_per_collect=32:
@@ -376,7 +384,8 @@ def train_fast(method, tasks, steps_per_task=250_000, n_envs=1024,
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    agent = FastSACAgent(method=method, batch_size=batch_size)
+    agent = FastSACAgent(method=method, batch_size=batch_size,
+                         fixed_alpha=fixed_alpha)
     buffer = NStepReplayBuffer(capacity=1_000_000)
 
     n = len(tasks)
@@ -468,6 +477,8 @@ def main():
     parser.add_argument('--grad_steps', type=int, default=205,
                         help='Gradient steps per collection round (UTD=0.2 at n_envs=1024)')
     parser.add_argument('--batch_size', type=int, default=512)
+    parser.add_argument('--fixed_alpha', type=float, default=None,
+                        help='Fix entropy coef (disable auto-tuning). E.g. 0.01')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--out', type=str, default='fast_result.json')
     args = parser.parse_args()
@@ -479,9 +490,10 @@ def main():
     else:
         tasks = args.tasks.split(',')
 
+    alpha_str = f', fixed_alpha={args.fixed_alpha}' if args.fixed_alpha else ', auto-alpha'
     print(f'Fast CL: method={args.method}, {len(tasks)} tasks, '
           f'{args.steps_per_task:,}/task, n_envs={args.n_envs}, '
-          f'grad_steps={args.grad_steps}, seed={args.seed}')
+          f'grad_steps={args.grad_steps}, seed={args.seed}{alpha_str}')
     print(f'Effective UTD = {args.grad_steps / args.n_envs:.4f}')
 
     result = train_fast(
@@ -491,6 +503,7 @@ def main():
         grad_steps_per_collect=args.grad_steps,
         batch_size=args.batch_size,
         seed=args.seed,
+        fixed_alpha=args.fixed_alpha,
     )
 
     os.makedirs('results', exist_ok=True)
