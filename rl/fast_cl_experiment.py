@@ -446,7 +446,9 @@ def train_fast(method, tasks, steps_per_task=250_000, n_envs=1024,
     avg_perf = np.mean(final_vals)
     print(f'  avg_performance: {avg_perf:.4f}')
 
-    return {'results': results, 'final': final, 'avg_performance': avg_perf,
+    # Convert tuple keys to strings for JSON serialization
+    results_str = {str(k): v for k, v in results.items()}
+    return {'results': results_str, 'final': final, 'avg_performance': avg_perf,
             'total_time': total_time}
 
 
