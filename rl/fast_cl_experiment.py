@@ -141,23 +141,27 @@ class TaskReplayStore:
 class FastActor(nn.Module):
     def __init__(self, use_compression=False):
         super().__init__()
-        self.fc1 = nn.Linear(OBS_DIM, 512)
-        self.fc2 = nn.Linear(512, 256)
-        self.fc3 = nn.Linear(256, 128)
-        self.mean = nn.Linear(128, ACT_DIM)
-        self.log_std = nn.Linear(128, ACT_DIM)
+        # Match cl_experiment.py architecture that WORKS
+        self.fc1 = nn.Linear(OBS_DIM, 256)
+        self.ln1 = nn.LayerNorm(256)
+        self.fc2 = nn.Linear(256, 256)
+        self.ln2 = nn.LayerNorm(256)
+        self.fc3 = nn.Linear(256, 256)
+        self.ln3 = nn.LayerNorm(256)
+        self.mean = nn.Linear(256, ACT_DIM)
+        self.log_std = nn.Linear(256, ACT_DIM)
         self.use_compression = use_compression
         if use_compression:
             self.importance = nn.ParameterList([
-                nn.Parameter(torch.full((512,), 8.0)),
                 nn.Parameter(torch.full((256,), 8.0)),
-                nn.Parameter(torch.full((128,), 8.0)),
+                nn.Parameter(torch.full((256,), 8.0)),
+                nn.Parameter(torch.full((256,), 8.0)),
             ])
 
     def forward(self, obs):
-        h = F.leaky_relu(self.fc1(obs))
-        h = F.leaky_relu(self.fc2(h))
-        h = F.leaky_relu(self.fc3(h))
+        h = F.leaky_relu(self.ln1(self.fc1(obs)))
+        h = F.leaky_relu(self.ln2(self.fc2(h)))
+        h = F.leaky_relu(self.ln3(self.fc3(h)))
         mu = self.mean(h)
         ls = torch.tanh(self.log_std(h))
         ls = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (ls + 1)
@@ -188,15 +192,15 @@ class FastCritic(nn.Module):
         super().__init__()
         d = OBS_DIM + ACT_DIM
         self.q1 = nn.Sequential(
-            nn.Linear(d, 512), nn.LeakyReLU(),
-            nn.Linear(512, 256), nn.LeakyReLU(),
-            nn.Linear(256, 128), nn.LeakyReLU(),
-            nn.Linear(128, 1))
+            nn.Linear(d, 256), nn.LayerNorm(256), nn.LeakyReLU(),
+            nn.Linear(256, 256), nn.LayerNorm(256), nn.LeakyReLU(),
+            nn.Linear(256, 256), nn.LayerNorm(256), nn.LeakyReLU(),
+            nn.Linear(256, 1))
         self.q2 = nn.Sequential(
-            nn.Linear(d, 512), nn.LeakyReLU(),
-            nn.Linear(512, 256), nn.LeakyReLU(),
-            nn.Linear(256, 128), nn.LeakyReLU(),
-            nn.Linear(128, 1))
+            nn.Linear(d, 256), nn.LayerNorm(256), nn.LeakyReLU(),
+            nn.Linear(256, 256), nn.LayerNorm(256), nn.LeakyReLU(),
+            nn.Linear(256, 256), nn.LayerNorm(256), nn.LeakyReLU(),
+            nn.Linear(256, 1))
 
     def forward(self, obs, act):
         x = torch.cat([obs, act], -1)
@@ -207,10 +211,10 @@ class FastCritic(nn.Module):
 # Fast SAC Agent
 # ========================================================================
 class FastSACAgent:
-    def __init__(self, method='finetune', lr=1e-3, gamma=0.99, tau=0.01,
+    def __init__(self, method='finetune', lr=1e-3, gamma=0.99, tau=0.005,
                  batch_size=4096, replay_ratio=0.25,
                  gamma_comp=0.01, grad_scale_beta=1.0,
-                 policy_delay=4, device=DEVICE):
+                 policy_delay=1, device=DEVICE):
         self.device = device
         self.method = method
         self.gamma = gamma
@@ -231,8 +235,8 @@ class FastSACAgent:
             p.requires_grad = False
 
         actor_params = [p for n, p in self.actor.named_parameters() if 'importance' not in n]
-        self.actor_opt = torch.optim.AdamW(actor_params, lr=lr, weight_decay=0.01)
-        self.critic_opt = torch.optim.AdamW(self.critic.parameters(), lr=lr, weight_decay=0.01)
+        self.actor_opt = torch.optim.Adam(actor_params, lr=lr)
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
         if self.use_compression:
             self.imp_opt = torch.optim.Adam(self.actor.importance.parameters(), lr=0.01)
 
@@ -246,7 +250,7 @@ class FastSACAgent:
 
         if self.use_compression:
             self.accumulated_importance = [
-                torch.zeros(s, device=device) for s in [512, 256, 128]
+                torch.zeros(256, device=device) for _ in range(3)
             ]
 
     @property
