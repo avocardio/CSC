@@ -241,7 +241,7 @@ class FastSACAgent:
             self.imp_opt = torch.optim.Adam(self.actor.importance.parameters(), lr=0.01)
 
         self.target_entropy = -float(ACT_DIM)
-        self.log_alpha = torch.zeros(1, device=device, requires_grad=True)
+        self.log_alpha = torch.full((1,), -1.6, device=device, requires_grad=True)  # alpha=0.2
         self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=lr)
 
         self.replay_store = TaskReplayStore(device) if self.use_replay else None
@@ -304,11 +304,13 @@ class FastSACAgent:
             if self.use_compression:
                 self.imp_opt.step()
 
-            # Alpha
+            # Alpha (clipped to prevent instability with batched envs)
             alpha_loss = -(self.log_alpha.exp() * (lp2 + self.target_entropy).detach()).mean()
             self.alpha_opt.zero_grad(set_to_none=True)
             alpha_loss.backward()
             self.alpha_opt.step()
+            with torch.no_grad():
+                self.log_alpha.clamp_(-5.0, -1.6)  # alpha in [0.007, 0.2]
 
         # Target soft update (vectorized)
         with torch.no_grad():
@@ -330,7 +332,7 @@ class FastSACAgent:
         self._current_task = task_idx
         if task_idx > 0:
             with torch.no_grad():
-                self.log_alpha.fill_(0.0)
+                self.log_alpha.fill_(-1.6)  # alpha=0.2 (within clamp range)
             self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=1e-3)
 
     def on_task_end(self, buffer, task_idx=0, n_tasks=10):
@@ -365,7 +367,7 @@ def evaluate_task(agent, task_name, n_eval_envs=16):
 # Training
 # ========================================================================
 def train_fast(method, tasks, steps_per_task=250_000, n_envs=1024,
-               grad_steps_per_collect=32, batch_size=4096, seed=42):
+               grad_steps_per_collect=205, batch_size=512, seed=42):
     """Fast CL training with low UTD and large batches.
 
     With n_envs=1024 and grad_steps_per_collect=32:
@@ -463,9 +465,9 @@ def main():
     parser.add_argument('--tasks', default='cw_learnable')
     parser.add_argument('--steps_per_task', type=int, default=250_000)
     parser.add_argument('--n_envs', type=int, default=1024)
-    parser.add_argument('--grad_steps', type=int, default=32,
-                        help='Gradient steps per collection round')
-    parser.add_argument('--batch_size', type=int, default=4096)
+    parser.add_argument('--grad_steps', type=int, default=205,
+                        help='Gradient steps per collection round (UTD=0.2 at n_envs=1024)')
+    parser.add_argument('--batch_size', type=int, default=512)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--out', type=str, default='fast_result.json')
     args = parser.parse_args()
