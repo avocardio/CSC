@@ -361,7 +361,7 @@ def evaluate_task(agent, task_name, n_eval_envs=16):
 # Training
 # ========================================================================
 def train_fast(method, tasks, steps_per_task=250_000, n_envs=1024,
-               grad_steps_per_collect=32, seed=42):
+               grad_steps_per_collect=32, batch_size=4096, seed=42):
     """Fast CL training with low UTD and large batches.
 
     With n_envs=1024 and grad_steps_per_collect=32:
@@ -370,7 +370,7 @@ def train_fast(method, tasks, steps_per_task=250_000, n_envs=1024,
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    agent = FastSACAgent(method=method, batch_size=4096)
+    agent = FastSACAgent(method=method, batch_size=batch_size)
     buffer = NStepReplayBuffer(capacity=1_000_000)
 
     n = len(tasks)
@@ -461,6 +461,7 @@ def main():
     parser.add_argument('--n_envs', type=int, default=1024)
     parser.add_argument('--grad_steps', type=int, default=32,
                         help='Gradient steps per collection round')
+    parser.add_argument('--batch_size', type=int, default=4096)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--out', type=str, default='fast_result.json')
     args = parser.parse_args()
@@ -482,6 +483,7 @@ def main():
         steps_per_task=args.steps_per_task,
         n_envs=args.n_envs,
         grad_steps_per_collect=args.grad_steps,
+        batch_size=args.batch_size,
         seed=args.seed,
     )
 
