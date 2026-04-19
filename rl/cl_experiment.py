@@ -215,11 +215,11 @@ class SACAgentCL:
         for p in self.critic_target.parameters():
             p.requires_grad = False
 
-        # Compile forward passes for kernel fusion (major speedup on GH200)
+        # Compile with CUDA graphs for kernel launch elimination (major speedup)
         if not self.use_packnet:  # PackNet needs grad masking, skip compile
-            self.actor = torch.compile(self.actor)
-            self.critic = torch.compile(self.critic)
-            self.critic_target = torch.compile(self.critic_target)
+            self.actor = torch.compile(self.actor, mode='reduce-overhead')
+            self.critic = torch.compile(self.critic, mode='reduce-overhead')
+            self.critic_target = torch.compile(self.critic_target, mode='reduce-overhead')
 
         actor_params = [p for n, p in self.actor.named_parameters()
                         if 'importance' not in n]
@@ -274,8 +274,10 @@ class SACAgentCL:
         with torch.no_grad():
             na, nlp = self.actor.sample(ns)
             q1t, q2t = self.critic_target(ns, na)
+            q1t, q2t = q1t.clone(), q2t.clone()
             qt = r + (1 - d) * self.gamma * (torch.min(q1t, q2t) - alpha * nlp)
         q1, q2 = self.critic(s, a)
+        q1, q2 = q1.clone(), q2.clone()  # prevent CUDA graph buffer overwrite
         cl = F.mse_loss(q1, qt) + F.mse_loss(q2, qt)
         self.critic_opt.zero_grad(set_to_none=True)
         cl.backward()
