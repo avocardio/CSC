@@ -217,9 +217,9 @@ class SACAgentCL:
 
         # Compile forward passes for kernel fusion (major speedup on GH200)
         if not self.use_packnet:  # PackNet needs grad masking, skip compile
-            self.actor = torch.compile(self.actor, mode='reduce-overhead')
-            self.critic = torch.compile(self.critic, mode='reduce-overhead')
-            self.critic_target = torch.compile(self.critic_target, mode='reduce-overhead')
+            self.actor = torch.compile(self.actor)
+            self.critic = torch.compile(self.critic)
+            self.critic_target = torch.compile(self.critic_target)
 
         actor_params = [p for n, p in self.actor.named_parameters()
                         if 'importance' not in n]
