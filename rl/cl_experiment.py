@@ -215,11 +215,11 @@ class SACAgentCL:
         for p in self.critic_target.parameters():
             p.requires_grad = False
 
-        # Compile with CUDA graphs for kernel launch elimination (major speedup)
-        if not self.use_packnet:  # PackNet needs grad masking, skip compile
-            self.actor = torch.compile(self.actor, mode='reduce-overhead')
-            self.critic = torch.compile(self.critic, mode='reduce-overhead')
-            self.critic_target = torch.compile(self.critic_target, mode='reduce-overhead')
+        # Compile for kernel fusion (CUDA graphs don't work — modules called 2x per step)
+        if not self.use_packnet:
+            self.actor = torch.compile(self.actor)
+            self.critic = torch.compile(self.critic)
+            self.critic_target = torch.compile(self.critic_target)
 
         actor_params = [p for n, p in self.actor.named_parameters()
                         if 'importance' not in n]
