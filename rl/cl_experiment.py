@@ -34,6 +34,7 @@ from rl.cw_gpu_env import OBS_DIM, ACT_DIM, MAX_EP_LEN
 
 
 LOG_STD_MIN, LOG_STD_MAX = -5.0, 2.0
+torch.set_float32_matmul_precision('high')  # TF32 on GH200 — ~2x matmul speedup
 
 
 # ========================================================================
@@ -214,12 +215,18 @@ class SACAgentCL:
         for p in self.critic_target.parameters():
             p.requires_grad = False
 
+        # Compile forward passes for kernel fusion (major speedup on GH200)
+        if not self.use_packnet:  # PackNet needs grad masking, skip compile
+            self.actor = torch.compile(self.actor, mode='reduce-overhead')
+            self.critic = torch.compile(self.critic, mode='reduce-overhead')
+            self.critic_target = torch.compile(self.critic_target, mode='reduce-overhead')
+
         actor_params = [p for n, p in self.actor.named_parameters()
                         if 'importance' not in n]
-        self.actor_opt = torch.optim.Adam(actor_params, lr=lr)
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
+        self.actor_opt = torch.optim.Adam(actor_params, lr=lr, fused=True)
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr, fused=True)
         if self.use_compression:
-            self.imp_opt = torch.optim.Adam(self.actor.importance.parameters(), lr=0.01)
+            self.imp_opt = torch.optim.Adam(self.actor.importance.parameters(), lr=0.01, fused=True)
 
         self.target_entropy = -float(ACT_DIM)
         self.log_alpha = torch.zeros(1, device=device, requires_grad=True)
@@ -270,7 +277,7 @@ class SACAgentCL:
             qt = r + (1 - d) * self.gamma * (torch.min(q1t, q2t) - alpha * nlp)
         q1, q2 = self.critic(s, a)
         cl = F.mse_loss(q1, qt) + F.mse_loss(q2, qt)
-        self.critic_opt.zero_grad()
+        self.critic_opt.zero_grad(set_to_none=True)
         cl.backward()
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=10.0)
         self.critic_opt.step()
@@ -287,7 +294,7 @@ class SACAgentCL:
                 for n, p in self.actor.named_parameters() if n in self.ewc_fisher
             )
             al = al + self.cl_reg_coef * ewc_loss
-        self.actor_opt.zero_grad()
+        self.actor_opt.zero_grad(set_to_none=True)
         if self.use_compression:
             self.imp_opt.zero_grad()
         al.backward()
@@ -304,7 +311,7 @@ class SACAgentCL:
 
         # Alpha
         alpha_loss = -(self.log_alpha.exp() * (lp2 + self.target_entropy).detach()).mean()
-        self.alpha_opt.zero_grad()
+        self.alpha_opt.zero_grad(set_to_none=True)
         alpha_loss.backward()
         self.alpha_opt.step()
 
@@ -473,7 +480,7 @@ def evaluate_task(agent, task_name, n_eval_envs=16, stochastic=True):
 # Main training loop
 # ========================================================================
 def train_cl(method, tasks, steps_per_task=1_000_000, n_envs=256,
-             start_steps=10000, update_freq=1.0, seed=42):
+             start_steps=10000, update_freq=1.0, batch_size=128, seed=42):
     """Run continual learning training over a sequence of tasks.
 
     Args:
@@ -486,7 +493,7 @@ def train_cl(method, tasks, steps_per_task=1_000_000, n_envs=256,
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    agent = SACAgentCL(method=method)
+    agent = SACAgentCL(method=method, batch_size=batch_size)
     buffer = ReplayBuffer(capacity=1_000_000)
 
     # Logged data: matrix[task_i_trained, task_j_evaluated] = success rate
@@ -627,6 +634,7 @@ def main():
                         help='Task sequence: reach_cycle or comma-separated list')
     parser.add_argument('--steps_per_task', type=int, default=1_000_000)
     parser.add_argument('--n_envs', type=int, default=256)
+    parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--out', type=str, default='cl_result.json')
     args = parser.parse_args()
@@ -645,6 +653,10 @@ def main():
     elif args.tasks == 'cw_full':
         tasks = ['hammer', 'push-wall', 'faucet-close', 'push-back',
                  'handle-press-side', 'push', 'window-close']
+    elif args.tasks == 'cw10':
+        tasks = ['hammer', 'push-wall', 'faucet-close', 'push-back', 'stick-pull',
+                 'handle-press-side', 'push', 'shelf-place', 'window-close',
+                 'peg-unplug-side']
     else:
         tasks = args.tasks.split(',')
 
@@ -656,6 +668,7 @@ def main():
         tasks=tasks,
         steps_per_task=args.steps_per_task,
         n_envs=args.n_envs,
+        batch_size=args.batch_size,
         seed=args.seed,
     )
 
