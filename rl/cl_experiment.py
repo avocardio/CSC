@@ -205,6 +205,8 @@ class SACAgentCL:
         self.use_compression = method in ('compression', 'csc')
         self.use_replay = method in ('replay', 'csc')
         self.use_ewc = method == 'ewc'
+        self.use_l2 = method == 'l2'
+        self.use_mas = method == 'mas'
         self.use_packnet = method == 'packnet'
         self._current_task = 0
 
@@ -240,6 +242,9 @@ class SACAgentCL:
         if self.use_ewc:
             self.ewc_fisher = {}
             self.ewc_params = {}
+        if self.use_l2 or self.use_mas:
+            self.reg_params = {}  # snapshot of params from prev task
+            self.mas_importance = {}  # MAS: output sensitivity per param
         if self.use_packnet:
             # Integer ownership tensor per kernel parameter (actor only)
             self.pn_owner = {}
@@ -285,6 +290,10 @@ class SACAgentCL:
         if self.use_ewc:
             ckpt['ewc_fisher'] = {n: v.cpu() for n, v in self.ewc_fisher.items()}
             ckpt['ewc_params'] = {n: v.cpu() for n, v in self.ewc_params.items()}
+        if self.use_l2 or self.use_mas:
+            ckpt['reg_params'] = {n: v.cpu() for n, v in self.reg_params.items()}
+        if self.use_mas:
+            ckpt['mas_importance'] = {n: v.cpu() for n, v in self.mas_importance.items()}
         if self.use_packnet:
             ckpt['pn_owner'] = {n: v.cpu() for n, v in self.pn_owner.items()}
             ckpt['pn_freeze_bn'] = self.pn_freeze_bn
@@ -318,6 +327,10 @@ class SACAgentCL:
         if self.use_ewc and 'ewc_fisher' in ckpt:
             self.ewc_fisher = {n: v.to(self.device) for n, v in ckpt['ewc_fisher'].items()}
             self.ewc_params = {n: v.to(self.device) for n, v in ckpt['ewc_params'].items()}
+        if (self.use_l2 or self.use_mas) and 'reg_params' in ckpt:
+            self.reg_params = {n: v.to(self.device) for n, v in ckpt['reg_params'].items()}
+        if self.use_mas and 'mas_importance' in ckpt:
+            self.mas_importance = {n: v.to(self.device) for n, v in ckpt['mas_importance'].items()}
         if self.use_packnet and 'pn_owner' in ckpt:
             self.pn_owner = {n: v.to(self.device) for n, v in ckpt['pn_owner'].items()}
             self.pn_freeze_bn = ckpt['pn_freeze_bn']
@@ -368,6 +381,18 @@ class SACAgentCL:
                 for n, p in self.actor.named_parameters() if n in self.ewc_fisher
             )
             al = al + self.cl_reg_coef * ewc_loss
+        if self.use_l2 and self.reg_params:
+            l2_loss = sum(
+                (p - self.reg_params[n]).pow(2).sum()
+                for n, p in self.actor.named_parameters() if n in self.reg_params
+            )
+            al = al + self.cl_reg_coef * l2_loss
+        if self.use_mas and self.reg_params:
+            mas_loss = sum(
+                (self.mas_importance[n] * (p - self.reg_params[n]).pow(2)).sum()
+                for n, p in self.actor.named_parameters() if n in self.mas_importance
+            )
+            al = al + self.cl_reg_coef * mas_loss
         self.actor_opt.zero_grad(set_to_none=True)
         if self.use_compression:
             self.imp_opt.zero_grad()
@@ -482,6 +507,13 @@ class SACAgentCL:
                         self.accumulated_importance[i], imp.data.clamp(min=0))
         if self.use_ewc:
             self._compute_ewc_fisher(buffer)
+        if self.use_l2:
+            # Snapshot params for L2 regularization toward previous task
+            for n, p in self.actor.named_parameters():
+                if 'importance' not in n:
+                    self.reg_params[n] = p.data.clone()
+        if self.use_mas:
+            self._compute_mas_importance(buffer)
         if self.use_packnet:
             self._packnet_prune(task_idx, n_tasks)
             self._packnet_retrain(buffer)
@@ -522,6 +554,33 @@ class SACAgentCL:
                 self.ewc_fisher[n] = self.ewc_fisher[n] + f
             else:
                 self.ewc_fisher[n] = f
+
+    def _compute_mas_importance(self, buffer, n_batches=10, bs=256):
+        """MAS: importance = mean |grad of actor output w.r.t. params|."""
+        params = [(n, p) for n, p in self.actor.named_parameters()
+                  if 'importance' not in n and p.requires_grad]
+        # Snapshot params
+        for n, p in params:
+            self.reg_params[n] = p.data.clone()
+
+        importance = {n: torch.zeros_like(p) for n, p in params}
+        for _ in range(n_batches):
+            s, _, _, _, _ = buffer.sample(bs)
+            mu, _ = self.actor(s)
+            # MAS uses the L2 norm of the output as the loss
+            loss = mu.pow(2).sum()
+            self.actor.zero_grad()
+            loss.backward()
+            for n, p in params:
+                if p.grad is not None:
+                    importance[n] += p.grad.data.abs()
+
+        for n in importance:
+            imp = (importance[n] / n_batches).clamp(min=1e-5)
+            if n in self.mas_importance:
+                self.mas_importance[n] = self.mas_importance[n] + imp
+            else:
+                self.mas_importance[n] = imp
 
 
 # ========================================================================
@@ -710,8 +769,8 @@ def compute_cl_metrics(eval_matrix: np.ndarray, tasks: list) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', type=str, default='finetune',
-                        choices=['finetune', 'ewc', 'replay', 'compression',
-                                 'csc', 'packnet'])
+                        choices=['finetune', 'l2', 'ewc', 'mas', 'replay',
+                                 'compression', 'csc', 'packnet'])
     parser.add_argument('--tasks', type=str, default='reach_cycle',
                         help='Task sequence: reach_cycle, cw10, or comma-separated list')
     parser.add_argument('--steps_per_task', type=int, default=1_000_000)
