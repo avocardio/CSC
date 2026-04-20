@@ -11,11 +11,14 @@
 #SBATCH -e scripts/cw10_val.%j.err
 
 # Validation: 1 seed, all 5 methods, full CW10 (10 tasks), 250K steps/task.
-# GPU 0: finetune
+# GPU 0: finetune (then csc after it finishes)
 # GPU 1: ewc
-# GPU 2: replay + csc (sequential — replay first, then csc)
+# GPU 2: replay
 # GPU 3: packnet
 # Each experiment: 10 tasks × 250K steps at ~80 sps ≈ 8.7h
+# finetune + csc sequential on GPU 0 ≈ 17.4h — won't fit in 12h.
+# So: run finetune/ewc/replay/packnet first (8.7h), then csc (8.7h) in a chained job.
+# This script runs batch 1 (4 methods). Submit batch 2 (csc) with dependency.
 
 set -euo pipefail
 cd /capstor/scratch/cscs/$USER/CSC
@@ -29,56 +32,44 @@ mkdir -p checkpoints
 
 git pull --ff-only origin main 2>/dev/null || true
 
-echo "CW10 validation run at $(date)"
-echo "5 methods, seed=42, 250K steps/task, 10 tasks"
+echo "CW10 validation batch 1 at $(date)"
+echo "4 methods: finetune, ewc, replay, packnet | seed=42, 250K steps/task"
 
-# GPU 0: finetune
 CUDA_VISIBLE_DEVICES=0 python rl/cl_experiment.py \
     --method finetune --tasks cw10 \
     --steps_per_task 250000 --n_envs 256 --batch_size 128 \
     --seed 42 --out val_finetune_s42.json \
     > checkpoints/val_finetune_s42.log 2>&1 &
 
-# GPU 1: ewc
 CUDA_VISIBLE_DEVICES=1 python rl/cl_experiment.py \
     --method ewc --tasks cw10 \
     --steps_per_task 250000 --n_envs 256 --batch_size 128 \
     --seed 42 --out val_ewc_s42.json \
     > checkpoints/val_ewc_s42.log 2>&1 &
 
-# GPU 2: packnet
 CUDA_VISIBLE_DEVICES=2 python rl/cl_experiment.py \
-    --method packnet --tasks cw10 \
-    --steps_per_task 250000 --n_envs 256 --batch_size 128 \
-    --seed 42 --out val_packnet_s42.json \
-    > checkpoints/val_packnet_s42.log 2>&1 &
-
-# GPU 3: replay
-CUDA_VISIBLE_DEVICES=3 python rl/cl_experiment.py \
     --method replay --tasks cw10 \
     --steps_per_task 250000 --n_envs 256 --batch_size 128 \
     --seed 42 --out val_replay_s42.json \
     > checkpoints/val_replay_s42.log 2>&1 &
 
-wait
-
-# Now CSC on GPU 0 (sequentially after finetune finishes)
-echo "Starting CSC at $(date)"
-CUDA_VISIBLE_DEVICES=0 python rl/cl_experiment.py \
-    --method csc --tasks cw10 \
+CUDA_VISIBLE_DEVICES=3 python rl/cl_experiment.py \
+    --method packnet --tasks cw10 \
     --steps_per_task 250000 --n_envs 256 --batch_size 128 \
-    --seed 42 --out val_csc_s42.json \
-    > checkpoints/val_csc_s42.log 2>&1
+    --seed 42 --out val_packnet_s42.json \
+    > checkpoints/val_packnet_s42.log 2>&1 &
+
+wait
 
 echo ""
 echo "=========================================="
-echo "CW10 VALIDATION RESULTS"
+echo "CW10 VALIDATION BATCH 1 RESULTS"
 echo "=========================================="
-for method in finetune ewc packnet replay csc; do
+for method in finetune ewc replay packnet; do
     echo "--- $method ---"
     grep "avg_performance\|avg_forgetting\|backward_transfer\|forward_transfer\|DONE" \
         checkpoints/val_${method}_s42.log 2>/dev/null | tail -6
     echo
 done
-echo "Done at $(date)"
+echo "Batch 1 done at $(date)"
 '
