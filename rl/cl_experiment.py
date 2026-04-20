@@ -114,18 +114,21 @@ class TaskReplayStore:
 class Actor(nn.Module):
     def __init__(self, hidden=256, use_compression=False):
         super().__init__()
+        # CW paper: 4 hidden layers × 256, LayerNorm+tanh first, LeakyReLU rest
         self.fc1 = nn.Linear(OBS_DIM, hidden)
         self.ln1 = nn.LayerNorm(hidden)
         self.fc2 = nn.Linear(hidden, hidden)
         self.ln2 = nn.LayerNorm(hidden)
         self.fc3 = nn.Linear(hidden, hidden)
         self.ln3 = nn.LayerNorm(hidden)
+        self.fc4 = nn.Linear(hidden, hidden)
+        self.ln4 = nn.LayerNorm(hidden)
         self.mean = nn.Linear(hidden, ACT_DIM)
         self.log_std = nn.Linear(hidden, ACT_DIM)
         self.use_compression = use_compression
         if use_compression:
-            # Per-unit bit-depth (importance): one per hidden unit
             self.importance = nn.ParameterList([
+                nn.Parameter(torch.full((hidden,), 8.0)),
                 nn.Parameter(torch.full((hidden,), 8.0)),
                 nn.Parameter(torch.full((hidden,), 8.0)),
                 nn.Parameter(torch.full((hidden,), 8.0)),
@@ -135,6 +138,7 @@ class Actor(nn.Module):
         h = F.leaky_relu(self.ln1(self.fc1(obs)))
         h = F.leaky_relu(self.ln2(self.fc2(h)))
         h = F.leaky_relu(self.ln3(self.fc3(h)))
+        h = F.leaky_relu(self.ln4(self.fc4(h)))
         mu = self.mean(h)
         ls = torch.tanh(self.log_std(h))
         ls = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (ls + 1)
@@ -173,9 +177,11 @@ class Critic(nn.Module):
             nn.Linear(d, hidden), nn.LayerNorm(hidden), nn.LeakyReLU(),
             nn.Linear(hidden, hidden), nn.LayerNorm(hidden), nn.LeakyReLU(),
             nn.Linear(hidden, hidden), nn.LayerNorm(hidden), nn.LeakyReLU(),
+            nn.Linear(hidden, hidden), nn.LayerNorm(hidden), nn.LeakyReLU(),
             nn.Linear(hidden, 1))
         self.q2 = nn.Sequential(
             nn.Linear(d, hidden), nn.LayerNorm(hidden), nn.LeakyReLU(),
+            nn.Linear(hidden, hidden), nn.LayerNorm(hidden), nn.LeakyReLU(),
             nn.Linear(hidden, hidden), nn.LayerNorm(hidden), nn.LeakyReLU(),
             nn.Linear(hidden, hidden), nn.LayerNorm(hidden), nn.LeakyReLU(),
             nn.Linear(hidden, 1))
@@ -190,7 +196,7 @@ class Critic(nn.Module):
 # ========================================================================
 class SACAgentCL:
     def __init__(self, method='finetune', lr=1e-3, gamma=0.99, tau=0.005,
-                 batch_size=128, replay_ratio=0.25, cl_reg_coef=100.0,
+                 batch_size=128, replay_ratio=0.25, cl_reg_coef=10000.0,
                  gamma_comp=0.01, grad_scale_beta=1.0,
                  device='cuda:0'):
         self.device = device
@@ -237,7 +243,7 @@ class SACAgentCL:
         self.replay_store = TaskReplayStore(device) if self.use_replay else None
         if self.use_compression:
             self.accumulated_importance = [
-                torch.zeros(256, device=device) for _ in range(3)
+                torch.zeros(256, device=device) for _ in range(4)
             ]
         if self.use_ewc:
             self.ewc_fisher = {}
@@ -421,7 +427,7 @@ class SACAgentCL:
 
     def _scale_actor_grads(self):
         beta = self.grad_scale_beta
-        layers = [self.actor.fc1, self.actor.fc2, self.actor.fc3]
+        layers = [self.actor.fc1, self.actor.fc2, self.actor.fc3, self.actor.fc4]
         for i, layer in enumerate(layers):
             acc = self.accumulated_importance[i]
             scale = 1.0 / (1.0 + beta * acc)
@@ -787,8 +793,8 @@ def main():
                         help='Compression loss weight (CSC)')
     parser.add_argument('--grad_scale_beta', type=float, default=1.0,
                         help='Gradient scaling strength (CSC)')
-    parser.add_argument('--cl_reg_coef', type=float, default=100.0,
-                        help='EWC regularization coefficient')
+    parser.add_argument('--cl_reg_coef', type=float, default=10000.0,
+                        help='EWC/L2/MAS regularization coefficient (CW paper: EWC=1e4, L2=1e5, MAS=1e4)')
     args = parser.parse_args()
 
     if args.tasks == 'reach_cycle':
