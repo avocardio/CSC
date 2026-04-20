@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-METHODS=(finetune ewc replay packnet csc)
+METHODS=(finetune l2 ewc mas replay packnet csc)
 SEEDS=(42 123 456 789 1337)
 
 echo "====================================="
