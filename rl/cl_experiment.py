@@ -555,7 +555,7 @@ def evaluate_task(agent, task_name, n_eval_envs=16, stochastic=True):
 # ========================================================================
 def train_cl(method, tasks, steps_per_task=1_000_000, n_envs=256,
              start_steps=10000, update_freq=1.0, batch_size=128, seed=42,
-             ckpt_dir='checkpoints', resume_from=None,
+             ckpt_dir='checkpoints', resume_from=None, run_name=None,
              gamma_comp=0.01, grad_scale_beta=1.0, cl_reg_coef=100.0):
     """Run continual learning training over a sequence of tasks.
 
@@ -633,7 +633,8 @@ def train_cl(method, tasks, steps_per_task=1_000_000, n_envs=256,
         env.close()
 
         # Checkpoint after each task
-        ckpt_name = f'{method}_s{seed}_task{task_idx}.pt'
+        tag = run_name or f'{method}_s{seed}'
+        ckpt_name = f'{tag}_task{task_idx}.pt'
         agent.save_checkpoint(
             os.path.join(ckpt_dir, ckpt_name), task_idx,
             eval_matrix.tolist(), learning_curves)
@@ -720,6 +721,8 @@ def main():
     parser.add_argument('--out', type=str, default='cl_result.json')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
+    parser.add_argument('--run_name', type=str, default=None,
+                        help='Name for checkpoint files (default: method_sSEED)')
     # CSC hyperparameters
     parser.add_argument('--gamma_comp', type=float, default=0.01,
                         help='Compression loss weight (CSC)')
@@ -763,6 +766,7 @@ def main():
         batch_size=args.batch_size,
         seed=args.seed,
         resume_from=args.resume,
+        run_name=args.run_name,
         gamma_comp=args.gamma_comp,
         grad_scale_beta=args.grad_scale_beta,
         cl_reg_coef=args.cl_reg_coef,
