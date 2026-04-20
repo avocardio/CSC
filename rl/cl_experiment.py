@@ -247,11 +247,83 @@ class SACAgentCL:
             for n, p in self.actor.named_parameters():
                 if 'weight' in n and p.dim() == 2 and 'importance' not in n:
                     self.pn_owner[n] = torch.zeros_like(p, dtype=torch.int32)
-            self.pn_retrain_steps = 25000  # 100K in CW paper but we use 250K/task
+            self.pn_retrain_steps = 100000  # CW paper standard
 
     @property
     def alpha(self):
         return self.log_alpha.exp().item()
+
+    def save_checkpoint(self, path, task_idx, eval_matrix, learning_curves):
+        """Save full agent state + experiment progress at a task boundary."""
+        # Get underlying module if compiled
+        actor_sd = (self.actor._orig_mod.state_dict()
+                    if hasattr(self.actor, '_orig_mod') else self.actor.state_dict())
+        critic_sd = (self.critic._orig_mod.state_dict()
+                     if hasattr(self.critic, '_orig_mod') else self.critic.state_dict())
+        critic_t_sd = (self.critic_target._orig_mod.state_dict()
+                       if hasattr(self.critic_target, '_orig_mod') else
+                       self.critic_target.state_dict())
+        ckpt = {
+            'task_idx': task_idx,
+            'method': self.method,
+            'actor': actor_sd,
+            'critic': critic_sd,
+            'critic_target': critic_t_sd,
+            'actor_opt': self.actor_opt.state_dict(),
+            'critic_opt': self.critic_opt.state_dict(),
+            'log_alpha': self.log_alpha.data.clone(),
+            'alpha_opt': self.alpha_opt.state_dict(),
+            'eval_matrix': eval_matrix,
+            'learning_curves': learning_curves,
+        }
+        if self.use_compression:
+            ckpt['imp_opt'] = self.imp_opt.state_dict()
+            ckpt['accumulated_importance'] = [a.clone() for a in self.accumulated_importance]
+        if self.use_replay and self.replay_store:
+            ckpt['replay_data'] = [(d[0].cpu(), d[1].cpu(), d[2].cpu(),
+                                    d[3].cpu(), d[4].cpu()) for d in self.replay_store.data]
+        if self.use_ewc:
+            ckpt['ewc_fisher'] = {n: v.cpu() for n, v in self.ewc_fisher.items()}
+            ckpt['ewc_params'] = {n: v.cpu() for n, v in self.ewc_params.items()}
+        if self.use_packnet:
+            ckpt['pn_owner'] = {n: v.cpu() for n, v in self.pn_owner.items()}
+            ckpt['pn_freeze_bn'] = self.pn_freeze_bn
+        torch.save(ckpt, path)
+        print(f'  Checkpoint saved: {path} (after task {task_idx})', flush=True)
+
+    def load_checkpoint(self, path):
+        """Load agent state from checkpoint. Returns (task_idx, eval_matrix, learning_curves)."""
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        # Load into underlying module if compiled
+        actor_mod = (self.actor._orig_mod if hasattr(self.actor, '_orig_mod')
+                     else self.actor)
+        critic_mod = (self.critic._orig_mod if hasattr(self.critic, '_orig_mod')
+                      else self.critic)
+        critic_t_mod = (self.critic_target._orig_mod
+                        if hasattr(self.critic_target, '_orig_mod')
+                        else self.critic_target)
+        actor_mod.load_state_dict(ckpt['actor'])
+        critic_mod.load_state_dict(ckpt['critic'])
+        critic_t_mod.load_state_dict(ckpt['critic_target'])
+        self.actor_opt.load_state_dict(ckpt['actor_opt'])
+        self.critic_opt.load_state_dict(ckpt['critic_opt'])
+        self.log_alpha.data.copy_(ckpt['log_alpha'])
+        self.alpha_opt.load_state_dict(ckpt['alpha_opt'])
+        if self.use_compression and 'imp_opt' in ckpt:
+            self.imp_opt.load_state_dict(ckpt['imp_opt'])
+            self.accumulated_importance = [a.to(self.device) for a in ckpt['accumulated_importance']]
+        if self.use_replay and 'replay_data' in ckpt:
+            self.replay_store.data = [
+                tuple(t.to(self.device) for t in d) for d in ckpt['replay_data']]
+        if self.use_ewc and 'ewc_fisher' in ckpt:
+            self.ewc_fisher = {n: v.to(self.device) for n, v in ckpt['ewc_fisher'].items()}
+            self.ewc_params = {n: v.to(self.device) for n, v in ckpt['ewc_params'].items()}
+        if self.use_packnet and 'pn_owner' in ckpt:
+            self.pn_owner = {n: v.to(self.device) for n, v in ckpt['pn_owner'].items()}
+            self.pn_freeze_bn = ckpt['pn_freeze_bn']
+        self._current_task = ckpt['task_idx'] + 1
+        print(f'  Loaded checkpoint: {path} (resuming from task {self._current_task})')
+        return ckpt['task_idx'], ckpt['eval_matrix'], ckpt['learning_curves']
 
     def update(self, buffer):
         # Sample batch (possibly mixed with replay)
@@ -482,39 +554,43 @@ def evaluate_task(agent, task_name, n_eval_envs=16, stochastic=True):
 # Main training loop
 # ========================================================================
 def train_cl(method, tasks, steps_per_task=1_000_000, n_envs=256,
-             start_steps=10000, update_freq=1.0, batch_size=128, seed=42):
+             start_steps=10000, update_freq=1.0, batch_size=128, seed=42,
+             ckpt_dir='checkpoints', resume_from=None,
+             gamma_comp=0.01, grad_scale_beta=1.0, cl_reg_coef=100.0):
     """Run continual learning training over a sequence of tasks.
 
-    Args:
-        method: 'finetune', 'ewc', 'replay', 'compression', 'csc'
-        tasks: list of task names (e.g., ['reach-front', 'reach-top', ...])
-        steps_per_task: env steps per task
-        n_envs: parallel envs (higher = faster data collection)
-        update_freq: gradient updates per env step (UTD ratio, lower = faster)
+    Checkpoints after each task boundary. Resume with resume_from=path.
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    agent = SACAgentCL(method=method, batch_size=batch_size)
+    agent = SACAgentCL(method=method, batch_size=batch_size,
+                       gamma_comp=gamma_comp, grad_scale_beta=grad_scale_beta,
+                       cl_reg_coef=cl_reg_coef)
     buffer = ReplayBuffer(capacity=1_000_000)
 
-    # Logged data: matrix[task_i_trained, task_j_evaluated] = success rate
-    # plus learning curves
     n = len(tasks)
-    eval_matrix = np.zeros((n, n))  # after training on task i, eval on all
-    learning_curves = {t: [] for t in tasks}  # list of (step, success) per task
+    eval_matrix = np.zeros((n, n))
+    learning_curves = {t: [] for t in tasks}
 
+    start_task = 0
+    if resume_from and os.path.exists(resume_from):
+        last_idx, eval_matrix, learning_curves = agent.load_checkpoint(resume_from)
+        eval_matrix = np.array(eval_matrix)
+        start_task = last_idx + 1
+        print(f'Resuming from task {start_task}/{n}')
+
+    os.makedirs(ckpt_dir, exist_ok=True)
     t_start = time.time()
 
-    for task_idx, task_name in enumerate(tasks):
+    for task_idx in range(start_task, n):
+        task_name = tasks[task_idx]
         print(f"\n{'='*60}")
         print(f"TASK {task_idx}/{n-1}: {task_name}")
         print(f"{'='*60}", flush=True)
 
         env = make_env(task_name, n_envs=n_envs)
         obs = env.reset()
-
-        # Clear buffer per task (CW convention)
         buffer.clear()
         agent.on_task_start(task_idx)
 
@@ -537,7 +613,6 @@ def train_cl(method, tasks, steps_per_task=1_000_000, n_envs=256,
                 for _ in range(n_updates):
                     agent.update(buffer)
 
-            # Log learning curve
             if task_steps % (n_envs * 40) < n_envs:
                 elapsed = time.time() - task_t0
                 sps = task_steps / max(elapsed, 1e-6)
@@ -547,10 +622,8 @@ def train_cl(method, tasks, steps_per_task=1_000_000, n_envs=256,
                       f'sps={sps:.0f} succ_curr={curr_succ:.3f} '
                       f'alpha={agent.alpha:.3f}', flush=True)
 
-        # End of task: snapshot for CL methods
         agent.on_task_end(buffer, task_idx=task_idx, n_tasks=n)
 
-        # Evaluate on ALL tasks (for eval matrix)
         print(f'  Evaluating on all {n} tasks...', flush=True)
         for eval_idx, eval_task in enumerate(tasks):
             succ = evaluate_task(agent, eval_task, n_eval_envs=16)
@@ -558,6 +631,12 @@ def train_cl(method, tasks, steps_per_task=1_000_000, n_envs=256,
             print(f'    {eval_task:20s}: {succ:.3f}', flush=True)
 
         env.close()
+
+        # Checkpoint after each task
+        ckpt_name = f'{method}_s{seed}_task{task_idx}.pt'
+        agent.save_checkpoint(
+            os.path.join(ckpt_dir, ckpt_name), task_idx,
+            eval_matrix.tolist(), learning_curves)
 
     total_time = time.time() - t_start
     print(f"\n{'='*60}")
@@ -633,12 +712,21 @@ def main():
                         choices=['finetune', 'ewc', 'replay', 'compression',
                                  'csc', 'packnet'])
     parser.add_argument('--tasks', type=str, default='reach_cycle',
-                        help='Task sequence: reach_cycle or comma-separated list')
+                        help='Task sequence: reach_cycle, cw10, or comma-separated list')
     parser.add_argument('--steps_per_task', type=int, default=1_000_000)
     parser.add_argument('--n_envs', type=int, default=256)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--out', type=str, default='cl_result.json')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint to resume from')
+    # CSC hyperparameters
+    parser.add_argument('--gamma_comp', type=float, default=0.01,
+                        help='Compression loss weight (CSC)')
+    parser.add_argument('--grad_scale_beta', type=float, default=1.0,
+                        help='Gradient scaling strength (CSC)')
+    parser.add_argument('--cl_reg_coef', type=float, default=100.0,
+                        help='EWC regularization coefficient')
     args = parser.parse_args()
 
     if args.tasks == 'reach_cycle':
@@ -664,6 +752,8 @@ def main():
 
     print(f'CL experiment: method={args.method}, tasks={tasks}')
     print(f'steps/task={args.steps_per_task}, n_envs={args.n_envs}, seed={args.seed}')
+    if args.resume:
+        print(f'Resuming from: {args.resume}')
 
     result = train_cl(
         method=args.method,
@@ -672,6 +762,10 @@ def main():
         n_envs=args.n_envs,
         batch_size=args.batch_size,
         seed=args.seed,
+        resume_from=args.resume,
+        gamma_comp=args.gamma_comp,
+        grad_scale_beta=args.grad_scale_beta,
+        cl_reg_coef=args.cl_reg_coef,
     )
 
     os.makedirs('checkpoints', exist_ok=True)
