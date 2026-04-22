@@ -78,12 +78,12 @@ class CWGPUEnvBase:
                 self.mjm.eq_data[i] = np.array(
                     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 5.0])
 
-        # Note: geom margins are kept at XML defaults (non-zero) for proper
-        # contact/friction physics. MuJoCo Warp 1.12+ supports this.
+        # Disable NATIVECCD to allow non-zero geom margins (needed for grasping).
+        # NATIVECCD crashes with margins; standard collision detection works fine.
+        import mujoco as _mj
+        self.mjm.opt.disableflags = _mj.mjtDisableBit.mjDSBL_NATIVECCD
 
         # Set up Warp
-        # Increase njmax to avoid nefc overflow warnings during contact-heavy states
-        self.mjm.opt.disableflags = 0
         # Ensure enough constraint budget (default is ~64)
         if hasattr(self.mjm.opt, 'njmax'):
             self.mjm.opt.njmax = max(256, self.mjm.opt.njmax)
