@@ -78,10 +78,8 @@ class CWGPUEnvBase:
                 self.mjm.eq_data[i] = np.array(
                     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 5.0])
 
-        # Fix for MuJoCo Warp CCD: set all geom margins to 0
-        # (MuJoCo Warp doesn't support non-zero margins with NATIVECCD)
-        for i in range(self.mjm.ngeom):
-            self.mjm.geom_margin[i] = 0.0
+        # Note: geom margins are kept at XML defaults (non-zero) for proper
+        # contact/friction physics. MuJoCo Warp 1.12+ supports this.
 
         # Set up Warp
         # Increase njmax to avoid nefc overflow warnings during contact-heavy states
