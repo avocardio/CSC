@@ -593,7 +593,7 @@ class SACAgentCL:
 # Evaluate on a task (deterministic)
 # ========================================================================
 @torch.no_grad()
-def evaluate_task(agent, task_name, n_eval_envs=16, stochastic=True):
+def evaluate_task(agent, task_name, n_eval_envs=64, stochastic=True):
     """Evaluate on task using stochastic policy (CW paper convention).
 
     Runs n_eval_envs episodes of MAX_EP_LEN steps each.

@@ -338,11 +338,38 @@ class CWGPUEnvBase:
         mocap_q = torch.tensor([1.0, 0.0, 1.0, 0.0], device=self.device)
         self.mocap_quat[idx, 0, :] = mocap_q
 
+        # Open gripper for done envs
+        self.ctrl[idx, 0] = -1.0
+        self.ctrl[idx, 1] = 1.0
+
+        # Relax physics to pull arm into mocap target position.
+        # _physics_step runs ALL envs, so save/restore alive envs.
+        alive = (~done).nonzero(as_tuple=False).squeeze(-1)
+        saved_qpos = self.qpos[alive].clone() if len(alive) > 0 else None
+        saved_qvel = self.qvel[alive].clone() if len(alive) > 0 else None
+        saved_ctrl = self.ctrl[alive].clone() if len(alive) > 0 else None
+        saved_mocap_pos = self.mocap_pos[alive].clone() if len(alive) > 0 else None
+        saved_mocap_quat = self.mocap_quat[alive].clone() if len(alive) > 0 else None
+
+        self._physics_step(50 * FRAME_SKIP)
+
+        # Restore alive envs to pre-relaxation state
+        if len(alive) > 0:
+            self.qpos[alive] = saved_qpos
+            self.qvel[alive] = saved_qvel
+            self.ctrl[alive] = saved_ctrl
+            self.mocap_pos[alive] = saved_mocap_pos
+            self.mocap_quat[alive] = saved_mocap_quat
+
+        # Snapshot init_tcp for done envs
+        tcp = self._get_tcp_center()
+        self.init_tcp[idx] = tcp[idx]
+
         # Episode state
         self.ep_len[idx] = 0
         self.success_once[idx] = False
         self.ep_return[idx] = 0.0
         self.prev_obs[idx] = 0.0
 
-        # Task-specific post-reset (no relaxation here for speed)
+        # Task-specific post-reset
         self._post_relax_init(idx)
