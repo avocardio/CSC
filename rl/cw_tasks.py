@@ -291,8 +291,10 @@ class PushEnv(CWGPUEnvBase):
         )
 
         reward = 2.0 * object_grasped
+        # Official: reward += 1.0 + reward + 5.0 * in_place
+        # = 2*reward + 1 + 5*in_place = 4*object_grasped + 1 + 5*in_place
         close_and_open = (tcp_to_obj < 0.02) & (tcp_opened > 0)
-        bonus = 1.0 + object_grasped + 5.0 * in_place
+        bonus = 1.0 + 2.0 * object_grasped + 5.0 * in_place
         reward = torch.where(close_and_open, reward + bonus, reward)
 
         success = target_to_obj < self.TARGET_RADIUS
@@ -575,15 +577,28 @@ class HandlePressSideEnv(CWGPUEnvBase):
 # SHELF PLACE
 # ==============================================================================
 class ShelfPlaceEnv(CWGPUEnvBase):
-    """Sawyer shelf-place. Pick up object and place it on a shelf."""
+    """Sawyer shelf-place. Pick up object and place it on a shelf.
+
+    Faithful port of MetaWorld SawyerShelfPlaceEnvV3 v2 reward.
+    """
     xml_file = 'sawyer_shelf_placing.xml'
 
     HAND_INIT_POS = torch.tensor([0.0, 0.6, 0.2])
+    OBJ_LOW = torch.tensor([-0.1, 0.5, 0.019])
+    OBJ_HIGH = torch.tensor([0.1, 0.6, 0.021])
+    GOAL_LOW = torch.tensor([-0.1, 0.8, 0.299])
+    GOAL_HIGH = torch.tensor([0.1, 0.9, 0.301])
     TARGET_RADIUS = 0.05
+    OBJ_QPOS_START = 9
 
     def _setup_ids(self):
         super()._setup_ids()
-        self.obj_bid = mujoco.mj_name2id(self.mjm, mujoco.mjtObj.mjOBJ_BODY, 'obj')
+        self.obj_bid = mujoco.mj_name2id(
+            self.mjm, mujoco.mjtObj.mjOBJ_BODY, 'obj')
+        self.shelf_bid = mujoco.mj_name2id(
+            self.mjm, mujoco.mjtObj.mjOBJ_BODY, 'shelf')
+        self.goal_sid = mujoco.mj_name2id(
+            self.mjm, mujoco.mjtObj.mjOBJ_SITE, 'goal')
 
     def _get_initial_hand_pos(self):
         return self.HAND_INIT_POS.to(self.device)
@@ -594,17 +609,33 @@ class ShelfPlaceEnv(CWGPUEnvBase):
             oq = self.xquat[:, self.obj_bid, :]
         else:
             op = torch.zeros(self.n_envs, 3, device=self.device)
-            oq = torch.tensor([1.0, 0, 0, 0], device=self.device).expand(self.n_envs, 4)
+            oq = torch.tensor([1, 0, 0, 0], device=self.device).expand(self.n_envs, 4)
         zeros = torch.zeros(self.n_envs, 7, device=self.device)
         return torch.cat([op, oq, zeros], dim=-1)
 
     def _randomize_state(self, idx: torch.Tensor):
-        # Default obj position from MetaWorld init_config
-        obj_init = torch.tensor([0.0, 0.6, 0.02], device=self.device)
-        self.obj_init_pos[idx] = obj_init
-        # Target ~30 cm above the obj (on shelf level)
-        self.target_pos[idx] = obj_init + torch.tensor(
-            [0.0, 0.0, 0.30], device=self.device)
+        n = len(idx)
+        obj_low = self.OBJ_LOW.to(self.device)
+        obj_high = self.OBJ_HIGH.to(self.device)
+        goal_low = self.GOAL_LOW.to(self.device)
+        goal_high = self.GOAL_HIGH.to(self.device)
+        rand = torch.rand(n, 6, device=self.device)
+        obj_pos = obj_low + rand[:, :3] * (obj_high - obj_low)
+        goal_pos = goal_low + rand[:, 3:] * (goal_high - goal_low)
+        # Ensure min distance
+        for _ in range(5):
+            xy_dist = torch.norm(obj_pos[:, :2] - goal_pos[:, :2], dim=-1)
+            need = xy_dist < 0.1
+            if not need.any():
+                break
+            goal_pos[need] = goal_low + torch.rand(
+                need.sum(), 3, device=self.device) * (goal_high - goal_low)
+
+        self.qpos[idx, self.OBJ_QPOS_START:self.OBJ_QPOS_START + 3] = obj_pos
+        self.qpos[idx, self.OBJ_QPOS_START + 3] = 1.0
+        self.qpos[idx, self.OBJ_QPOS_START + 4:self.OBJ_QPOS_START + 7] = 0.0
+        self.obj_init_pos[idx] = obj_pos
+        self.target_pos[idx] = goal_pos
 
     def _compute_reward(self, action: torch.Tensor,
                         obs: torch.Tensor) -> torch.Tensor:
@@ -615,24 +646,49 @@ class ShelfPlaceEnv(CWGPUEnvBase):
 
         obj_to_target = torch.norm(obj - target, dim=-1)
         tcp_to_obj = torch.norm(obj - tcp, dim=-1)
-        in_place_margin = torch.norm(self.obj_init_pos - target, dim=-1).clamp(min=1e-3)
+        in_place_margin = torch.norm(
+            self.obj_init_pos - target, dim=-1).clamp(min=1e-3)
+
         in_place = tolerance(
-            obj_to_target,
-            bounds=(0.0, self.TARGET_RADIUS),
-            margin=in_place_margin,
-            sigmoid='long_tail')
+            obj_to_target, bounds=(0.0, self.TARGET_RADIUS),
+            margin=in_place_margin, sigmoid='long_tail')
 
-        # Add a dense reach reward so the policy gets early signal
-        reach_reward = (1.0 - (tcp_to_obj / 0.3).clamp(0.0, 1.0))
+        left = self._get_leftpad()
+        right = self._get_rightpad()
+        object_grasped = gripper_caging_reward(
+            action, obj, self.obj_init_pos, tcp, self.init_tcp, left, right,
+            obj_radius=0.02,
+            pad_success_thresh=0.05,
+            object_reach_radius=0.01,
+            xz_thresh=0.01,
+            high_density=False,
+        )
+        reward = hamacher_product(object_grasped, in_place)
 
-        reward = 0.5 * reach_reward + hamacher_product(reach_reward, in_place)
+        # Bound loss: penalize object below/behind shelf
+        below_shelf = (obj[:, 2] > 0.0) & (obj[:, 2] < 0.24)
+        in_x_range = (obj[:, 0] > target[:, 0] - 0.15) & (
+            obj[:, 0] < target[:, 0] + 0.15)
+        behind_shelf = obj[:, 1] > target[:, 1]
+        approaching = (obj[:, 1] > target[:, 1] - 3 * self.TARGET_RADIUS) & (
+            obj[:, 1] < target[:, 1])
+        z_scale = ((0.24 - obj[:, 2]) / 0.24).clamp(0, 1)
+        y_scale = ((obj[:, 1] - (target[:, 1] - 3 * self.TARGET_RADIUS)) /
+                   (3 * self.TARGET_RADIUS)).clamp(0, 1)
+        bound_loss = hamacher_product(y_scale, z_scale)
+        in_place = torch.where(
+            below_shelf & in_x_range & approaching,
+            (in_place - bound_loss).clamp(0, 1), in_place)
+        in_place = torch.where(
+            below_shelf & in_x_range & behind_shelf,
+            torch.zeros_like(in_place), in_place)
 
-        # Bonus when grasping
-        grasping = ((tcp_to_obj < 0.025) & (tcp_opened > 0) &
-                    (obj[:, 2] - 0.01 > self.obj_init_pos[:, 2]))
-        reward = torch.where(grasping, reward + 1.0 + 5.0 * in_place, reward)
+        # Grasping bonus
+        lifted = obj[:, 2] - 0.01 > self.obj_init_pos[:, 2]
+        grasping = (tcp_to_obj < 0.025) & (tcp_opened > 0) & lifted
+        reward = torch.where(
+            grasping, reward + 1.0 + 5.0 * in_place, reward)
 
-        # Success bonus
         success = obj_to_target < self.TARGET_RADIUS
         reward = torch.where(
             success, torch.tensor(10.0, device=self.device), reward)
@@ -649,11 +705,21 @@ class ShelfPlaceEnv(CWGPUEnvBase):
 # STICK PULL
 # ==============================================================================
 class StickPullEnv(CWGPUEnvBase):
-    """Sawyer stick-pull. Pick up stick and use it to pull a container."""
+    """Sawyer stick-pull. Pick up stick and insert into container to pull it.
+
+    Faithful port of MetaWorld SawyerStickPullEnvV3 v2 reward.
+    Three phases: grasp stick → insert into container → pull container.
+    """
     xml_file = 'sawyer_stick_obj.xml'
 
     HAND_INIT_POS = torch.tensor([0.0, 0.6, 0.2])
+    STICK_LOW = torch.tensor([-0.1, 0.55, 0.0])
+    STICK_HIGH = torch.tensor([0.0, 0.65, 0.001])
+    GOAL_LOW = torch.tensor([0.35, 0.45, 0.0199])
+    GOAL_HIGH = torch.tensor([0.45, 0.55, 0.0201])
     TARGET_RADIUS = 0.05
+    STICK_QPOS_START = 9  # stick freejoint
+    CONTAINER_QPOS_START = 16  # container joint
 
     def _setup_ids(self):
         super()._setup_ids()
@@ -661,83 +727,163 @@ class StickPullEnv(CWGPUEnvBase):
             self.mjm, mujoco.mjtObj.mjOBJ_BODY, 'stick')
         self.object_bid = mujoco.mj_name2id(
             self.mjm, mujoco.mjtObj.mjOBJ_BODY, 'object')
+        self.insertion_sid = mujoco.mj_name2id(
+            self.mjm, mujoco.mjtObj.mjOBJ_SITE, 'insertion')
+        self.stick_end_sid = mujoco.mj_name2id(
+            self.mjm, mujoco.mjtObj.mjOBJ_SITE, 'stick_end')
 
     def _get_initial_hand_pos(self):
         return self.HAND_INIT_POS.to(self.device)
 
     def _get_obj_obs(self) -> torch.Tensor:
-        if self.stick_bid >= 0:
-            stick_pos = self.xpos[:, self.stick_bid, :]
-            stick_quat = self.xquat[:, self.stick_bid, :]
-        else:
-            stick_pos = torch.zeros(self.n_envs, 3, device=self.device)
-            stick_quat = torch.tensor(
-                [1.0, 0, 0, 0], device=self.device).expand(self.n_envs, 4)
-        if self.object_bid >= 0:
-            obj_pos = self.xpos[:, self.object_bid, :]
-        else:
-            obj_pos = torch.zeros(self.n_envs, 3, device=self.device)
+        stick_pos = self.xpos[:, self.stick_bid, :]
+        stick_quat = self.xquat[:, self.stick_bid, :]
+        insertion_pos = self.site_xpos[:, self.insertion_sid, :] \
+            if self.insertion_sid >= 0 else torch.zeros(self.n_envs, 3, device=self.device)
         zeros = torch.zeros(self.n_envs, 4, device=self.device)
-        return torch.cat([stick_pos, stick_quat, obj_pos, zeros], dim=-1)
+        return torch.cat([stick_pos, stick_quat, insertion_pos, zeros], dim=-1)
 
     def _randomize_state(self, idx: torch.Tensor):
-        # Default positions
-        stick_init = torch.tensor([0.2, 0.69, 0.04], device=self.device)
-        self.obj_init_pos[idx] = stick_init  # using as "object init"
-        # Target = pull container 15 cm to the left
-        self.target_pos[idx] = torch.tensor(
-            [0.05, 0.69, 0.04], device=self.device)
+        n = len(idx)
+        # Randomize stick position
+        s_low = self.STICK_LOW.to(self.device)
+        s_high = self.STICK_HIGH.to(self.device)
+        stick_pos = s_low + torch.rand(n, 3, device=self.device) * (s_high - s_low)
+        self.qpos[idx, self.STICK_QPOS_START:self.STICK_QPOS_START + 3] = stick_pos
+        self.qpos[idx, self.STICK_QPOS_START + 3] = 1.0
+        self.qpos[idx, self.STICK_QPOS_START + 4:self.STICK_QPOS_START + 7] = 0.0
+        # Container at fixed position
+        container_pos = torch.tensor([0.2, 0.69, 0.0], device=self.device)
+        # Goal: pull container to target
+        g_low = self.GOAL_LOW.to(self.device)
+        g_high = self.GOAL_HIGH.to(self.device)
+        goal = g_low + torch.rand(n, 3, device=self.device) * (g_high - g_low)
+        self.obj_init_pos[idx] = container_pos  # container init
+        self.target_pos[idx] = goal
+
+    def _post_relax_init(self, idx):
+        # Record stick init position after physics settle
+        self.stick_init_pos = self.xpos[:, self.stick_bid, :].clone()
 
     def _compute_reward(self, action: torch.Tensor,
                         obs: torch.Tensor) -> torch.Tensor:
-        # Simplified: dense reach + caging + container proximity
         tcp = self._get_tcp_center()
         stick = obs[:, 4:7]
-        container = obs[:, 11:14]
+        insertion = obs[:, 11:14]  # insertion site = container handle
+        tcp_opened = obs[:, 3]
+        target = self.target_pos
+
+        container = insertion + torch.tensor([0.05, 0.0, 0.0], device=self.device)
+        container_init = self.obj_init_pos + torch.tensor(
+            [0.05, 0.0, 0.0], device=self.device)
 
         tcp_to_stick = torch.norm(stick - tcp, dim=-1)
-        container_to_target = torch.norm(container - self.target_pos, dim=-1)
+        handle_to_target = torch.norm(insertion - target, dim=-1)
 
-        # Dense reach reward (independent of caging)
-        reach_reward = (1.0 - (tcp_to_stick / 0.3).clamp(0.0, 1.0))
+        # Stick to container distance (yz-weighted)
+        yz_scale = torch.tensor([1.0, 1.0, 2.0], device=self.device)
+        stick_to_container = torch.norm((stick - container) * yz_scale, dim=-1)
+        stick_to_container_init = torch.norm(
+            (self.stick_init_pos - container_init) * yz_scale, dim=-1)
+        stick_in_place = tolerance(
+            stick_to_container, bounds=(0.0, self.TARGET_RADIUS),
+            margin=stick_to_container_init.clamp(min=1e-3), sigmoid='long_tail')
 
-        margin = torch.norm(self.obj_init_pos - self.target_pos, dim=-1).clamp(min=1e-3)
-        in_place = tolerance(
-            container_to_target,
-            bounds=(0.0, self.TARGET_RADIUS),
-            margin=margin,
-            sigmoid='long_tail')
+        # Stick to target
+        stick_to_target = torch.norm(stick - target, dim=-1)
+        stick_to_target_init = torch.norm(
+            self.stick_init_pos - target, dim=-1)
+        stick_in_place_2 = tolerance(
+            stick_to_target, bounds=(0.0, self.TARGET_RADIUS),
+            margin=stick_to_target_init.clamp(min=1e-3), sigmoid='long_tail')
 
-        reward = 0.5 * reach_reward + hamacher_product(reach_reward, in_place)
-        success = container_to_target < self.TARGET_RADIUS
+        # Container to target
+        container_to_target = torch.norm(container - target, dim=-1)
+        container_to_target_init = torch.norm(
+            self.obj_init_pos - target, dim=-1)
+        container_in_place = tolerance(
+            container_to_target, bounds=(0.0, self.TARGET_RADIUS),
+            margin=container_to_target_init.clamp(min=1e-3), sigmoid='long_tail')
+
+        left = self._get_leftpad()
+        right = self._get_rightpad()
+        object_grasped = gripper_caging_reward(
+            action, stick, self.stick_init_pos, tcp, self.init_tcp, left, right,
+            obj_radius=0.014,
+            pad_success_thresh=0.05,
+            object_reach_radius=0.01,
+            xz_thresh=0.01,
+            high_density=True,
+        )
+
+        # Phase 1: grasp the stick
+        grasp_success = (tcp_to_stick < 0.02) & (tcp_opened > 0) & (
+            stick[:, 2] - 0.01 > self.stick_init_pos[:, 2])
+        object_grasped = torch.where(
+            grasp_success, torch.ones_like(object_grasped), object_grasped)
+
+        in_place_and_grasped = hamacher_product(object_grasped, stick_in_place)
+        reward = in_place_and_grasped
+
+        # Phase 2: grasped — push stick toward container
         reward = torch.where(
-            success, torch.tensor(10.0, device=self.device), reward)
+            grasp_success,
+            1.0 + in_place_and_grasped + 5.0 * stick_in_place,
+            reward)
+
+        # Phase 3: stick inserted — pull container toward target
+        end_of_stick = self.site_xpos[:, self.stick_end_sid, :] \
+            if self.stick_end_sid >= 0 else stick
+        inserted = (end_of_stick[:, 0] >= insertion[:, 0]) & (
+            (end_of_stick[:, 1] - insertion[:, 1]).abs() <= 0.04) & (
+            (end_of_stick[:, 2] - insertion[:, 2]).abs() <= 0.06)
+        reward = torch.where(
+            grasp_success & inserted,
+            1.0 + in_place_and_grasped + 5.0 + 2.0 * stick_in_place_2 +
+            1.0 * container_in_place,
+            reward)
+        # Full success
+        reward = torch.where(
+            grasp_success & inserted & (handle_to_target <= 0.12),
+            torch.tensor(10.0, device=self.device), reward)
         return reward
 
     def _compute_success(self) -> torch.Tensor:
-        if self.object_bid < 0:
-            return torch.zeros(self.n_envs, dtype=torch.bool, device=self.device)
-        obj = self.xpos[:, self.object_bid, :]
-        return torch.norm(obj - self.target_pos, dim=-1) < self.TARGET_RADIUS
+        insertion = self.site_xpos[:, self.insertion_sid, :] \
+            if self.insertion_sid >= 0 else torch.zeros(self.n_envs, 3, device=self.device)
+        end_of_stick = self.site_xpos[:, self.stick_end_sid, :] \
+            if self.stick_end_sid >= 0 else torch.zeros(self.n_envs, 3, device=self.device)
+        handle_to_target = torch.norm(insertion - self.target_pos, dim=-1)
+        inserted = (end_of_stick[:, 0] >= insertion[:, 0]) & (
+            (end_of_stick[:, 1] - insertion[:, 1]).abs() <= 0.04) & (
+            (end_of_stick[:, 2] - insertion[:, 2]).abs() <= 0.06)
+        return (handle_to_target <= 0.12) & inserted
 
 
 # ==============================================================================
 # PEG UNPLUG SIDE
 # ==============================================================================
 class PegUnplugSideEnv(CWGPUEnvBase):
-    """Sawyer peg unplug side. Grab peg and pull it out sideways."""
+    """Sawyer peg unplug side. Grab peg and pull it out sideways.
+
+    Faithful port of MetaWorld SawyerPegUnplugSideEnvV3 v2 reward.
+    """
     xml_file = 'sawyer_peg_unplug_side.xml'
 
     HAND_INIT_POS = torch.tensor([0.0, 0.6, 0.2])
+    OBJ_LOW = torch.tensor([-0.25, 0.6, -0.001])
+    OBJ_HIGH = torch.tensor([-0.15, 0.8, 0.001])
+    PEG_QPOS_START = 9
     TARGET_RADIUS = 0.07
 
     def _setup_ids(self):
         super()._setup_ids()
-        # pegEnd site is the reference point for the peg position
         self.peg_sid = mujoco.mj_name2id(
             self.mjm, mujoco.mjtObj.mjOBJ_SITE, 'pegEnd')
         self.plug_bid = mujoco.mj_name2id(
             self.mjm, mujoco.mjtObj.mjOBJ_BODY, 'plug1')
+        self.box_bid = mujoco.mj_name2id(
+            self.mjm, mujoco.mjtObj.mjOBJ_BODY, 'box')
 
     def _get_initial_hand_pos(self):
         return self.HAND_INIT_POS.to(self.device)
@@ -756,46 +902,66 @@ class PegUnplugSideEnv(CWGPUEnvBase):
         return torch.cat([peg_pos, plug_quat, zeros], dim=-1)
 
     def _randomize_state(self, idx: torch.Tensor):
-        # Fixed positions for simplicity
-        plug_init = torch.tensor(
-            [-0.181, 0.6, 0.181], device=self.device)  # obj_init_pos + [0.044, 0, 0.131]
-        self.obj_init_pos[idx] = plug_init
-        # Target = plug + [0.15, 0, 0] (pull out 15 cm to the right)
-        self.target_pos[idx] = plug_init + torch.tensor(
+        n = len(idx)
+        low = self.OBJ_LOW.to(self.device)
+        high = self.OBJ_HIGH.to(self.device)
+        # Randomize box position
+        rand = torch.rand(n, 3, device=self.device)
+        pos_box = low + rand * (high - low)
+        # Plug = box + [0.044, 0, 0.131]
+        pos_plug = pos_box + torch.tensor([0.044, 0.0, 0.131], device=self.device)
+        self.qpos[idx, self.PEG_QPOS_START:self.PEG_QPOS_START + 3] = pos_plug
+        self.qpos[idx, self.PEG_QPOS_START + 3] = 1.0
+        self.qpos[idx, self.PEG_QPOS_START + 4:self.PEG_QPOS_START + 7] = 0.0
+        self.obj_init_pos[idx] = pos_plug  # will be updated in _post_relax_init
+        # Target = plug + [0.15, 0, 0]
+        self.target_pos[idx] = pos_plug + torch.tensor(
             [0.15, 0.0, 0.0], device=self.device)
+
+    def _post_relax_init(self, idx):
+        # After physics relaxation, read actual pegEnd site position
+        if self.peg_sid >= 0:
+            self.obj_init_pos[idx] = self.site_xpos[idx, self.peg_sid, :]
 
     def _compute_reward(self, action: torch.Tensor,
                         obs: torch.Tensor) -> torch.Tensor:
         obj = obs[:, 4:7]
         tcp = self._get_tcp_center()
+        tcp_opened = obs[:, 3]
         target = self.target_pos
 
         tcp_to_obj = torch.norm(obj - tcp, dim=-1)
         obj_to_target = torch.norm(obj - target, dim=-1)
 
-        # Simplified caging: proximity to peg
-        reach_reward = (1.0 - (tcp_to_obj / 0.2).clamp(0.0, 1.0))
+        left = self._get_leftpad()
+        right = self._get_rightpad()
+        object_grasped = gripper_caging_reward(
+            action, obj, self.obj_init_pos, tcp, self.init_tcp, left, right,
+            obj_radius=0.025,
+            pad_success_thresh=0.05,
+            object_reach_radius=0.01,
+            xz_thresh=0.005,
+            desired_gripper_effort=0.8,
+            high_density=True,
+        )
 
         in_place_margin = torch.norm(self.obj_init_pos - target, dim=-1)
         in_place = tolerance(
-            obj_to_target,
-            bounds=(0.0, 0.05),
-            margin=in_place_margin,
-            sigmoid='long_tail')
+            obj_to_target, bounds=(0.0, 0.05),
+            margin=in_place_margin, sigmoid='long_tail')
 
-        # Gripper closing bonus
-        gripper_closed = (1.0 - obs[:, 3])  # 0 = open, 1 = closed
-        grasp_success = (tcp_to_obj < 0.035) & (gripper_closed > 0.3)
+        # Grasp success: gripper open > 0.5 AND peg moved in +x
+        grasp_success = (tcp_opened > 0.5) & (
+            obj[:, 0] - self.obj_init_pos[:, 0] > 0.015)
 
-        reward = 2.0 * reach_reward
+        reward = 2.0 * object_grasped
         reward = torch.where(
-            grasp_success,
-            1.0 + 2.0 * reach_reward + 5.0 * in_place,
+            grasp_success & (tcp_to_obj < 0.035),
+            1.0 + 2.0 * object_grasped + 5.0 * in_place,
             reward)
         reward = torch.where(
             obj_to_target <= 0.05,
-            torch.tensor(10.0, device=self.device),
-            reward)
+            torch.tensor(10.0, device=self.device), reward)
         return reward
 
     def _compute_success(self) -> torch.Tensor:
@@ -809,24 +975,130 @@ class PegUnplugSideEnv(CWGPUEnvBase):
 # PUSH WALL
 # ==============================================================================
 class PushWallEnv(PushEnv):
-    """Push with a wall between object and target (same reward as push)."""
+    """Push with wall. Two-phase reward: push to midpoint, then to target.
+
+    Faithful port of MetaWorld SawyerPushWallEnvV3 v2 reward.
+    """
     xml_file = 'sawyer_push_wall_v3.xml'
     OBJ_LOW = torch.tensor([-0.05, 0.60, 0.015])
     OBJ_HIGH = torch.tensor([0.05, 0.65, 0.015])
     GOAL_LOW = torch.tensor([-0.05, 0.85, 0.01])
     GOAL_HIGH = torch.tensor([0.05, 0.9, 0.02])
 
+    def _compute_reward(self, action: torch.Tensor,
+                        obs: torch.Tensor) -> torch.Tensor:
+        obj = obs[:, 4:7]
+        tcp_opened = obs[:, 3]
+        tcp = self._get_tcp_center()
+        target = self.target_pos
+
+        tcp_to_obj = torch.norm(obj - tcp, dim=-1)
+        obj_to_target = torch.norm(obj - target, dim=-1)
+        obj_to_target_init = torch.norm(self.obj_init_pos - target, dim=-1)
+
+        # Midpoint: around the wall at [-0.05, 0.77, obj_z]
+        midpoint = torch.zeros_like(obj)
+        midpoint[:, 0] = -0.05
+        midpoint[:, 1] = 0.77
+        midpoint[:, 2] = obj[:, 2]
+
+        # in_place_scaling emphasizes x-axis (going around wall)
+        scale = torch.tensor([3.0, 1.0, 1.0], device=self.device)
+        obj_to_mid = torch.norm((obj - midpoint) * scale, dim=-1)
+        obj_to_mid_init = torch.norm(
+            (self.obj_init_pos - midpoint) * scale, dim=-1)
+
+        in_place_part1 = tolerance(
+            obj_to_mid, bounds=(0.0, self.TARGET_RADIUS),
+            margin=obj_to_mid_init, sigmoid='long_tail')
+        in_place_part2 = tolerance(
+            obj_to_target, bounds=(0.0, self.TARGET_RADIUS),
+            margin=obj_to_target_init, sigmoid='long_tail')
+
+        left = self._get_leftpad()
+        right = self._get_rightpad()
+        object_grasped = gripper_caging_reward(
+            action, obj, self.obj_init_pos, tcp, self.init_tcp, left, right,
+            obj_radius=0.015, pad_success_thresh=0.05,
+            object_reach_radius=0.01, xz_thresh=0.005, high_density=True)
+
+        reward = 2.0 * object_grasped
+
+        # Phase 1: push toward midpoint
+        close_and_open = (tcp_to_obj < 0.02) & (tcp_opened > 0)
+        reward = torch.where(
+            close_and_open,
+            2.0 * object_grasped + 1.0 + 4.0 * in_place_part1,
+            reward)
+        # Phase 2: past midpoint (y > 0.75), push toward target
+        past_wall = close_and_open & (obj[:, 1] > 0.75)
+        reward = torch.where(
+            past_wall,
+            2.0 * object_grasped + 1.0 + 4.0 + 3.0 * in_place_part2,
+            reward)
+        # Success
+        success = obj_to_target < self.TARGET_RADIUS
+        reward = torch.where(
+            success, torch.tensor(10.0, device=self.device), reward)
+        return reward
+
 
 # ==============================================================================
 # PUSH BACK  (push object toward robot instead of away)
 # ==============================================================================
 class PushBackEnv(PushEnv):
-    """Push object back toward robot."""
+    """Push object back toward robot. Different reward from forward push.
+
+    Faithful port of MetaWorld SawyerPushBackEnvV3 v2 reward.
+    """
     xml_file = 'sawyer_push_back_v3.xml'
-    OBJ_LOW = torch.tensor([-0.1, 0.7, 0.02])
-    OBJ_HIGH = torch.tensor([0.1, 0.8, 0.02])
-    GOAL_LOW = torch.tensor([-0.1, 0.6, 0.015])
-    GOAL_HIGH = torch.tensor([0.1, 0.7, 0.015])
+    OBJ_LOW = torch.tensor([-0.1, 0.8, 0.02])   # obj starts FURTHER from robot
+    OBJ_HIGH = torch.tensor([0.1, 0.85, 0.02])
+    GOAL_LOW = torch.tensor([-0.1, 0.6, 0.0199])  # goal is CLOSER to robot
+    GOAL_HIGH = torch.tensor([0.1, 0.7, 0.0201])
+    OBJ_RADIUS = 0.007
+
+    def _compute_reward(self, action: torch.Tensor,
+                        obs: torch.Tensor) -> torch.Tensor:
+        obj = obs[:, 4:7]
+        tcp_opened = obs[:, 3]
+        tcp = self._get_tcp_center()
+
+        tcp_to_obj = torch.norm(obj - tcp, dim=-1)
+        target_to_obj = torch.norm(obj - self.target_pos, dim=-1)
+        target_to_obj_init = torch.norm(
+            self.obj_init_pos - self.target_pos, dim=-1)
+
+        in_place = tolerance(
+            target_to_obj, bounds=(0.0, self.TARGET_RADIUS),
+            margin=target_to_obj_init, sigmoid='long_tail')
+
+        # Push-back uses its own simplified caging (not gripper_caging_reward)
+        left = self._get_leftpad()
+        right = self._get_rightpad()
+        object_grasped = gripper_caging_reward(
+            action, obj, self.obj_init_pos, tcp, self.init_tcp, left, right,
+            obj_radius=self.OBJ_RADIUS,
+            pad_success_thresh=0.05,
+            object_reach_radius=0.01,
+            xz_thresh=0.005,
+            high_density=True,
+        )
+
+        # Base reward: hamacher product of grasping and placement
+        reward = hamacher_product(object_grasped, in_place)
+
+        # Bonus: tighter conditions than forward push
+        obj_moved = target_to_obj_init - target_to_obj > 0.01
+        close_grip = (tcp_to_obj < 0.01) & (tcp_opened > 0) & (tcp_opened < 0.55)
+        bonus_cond = close_grip & obj_moved
+        reward = torch.where(
+            bonus_cond, reward + 1.0 + 5.0 * in_place, reward)
+
+        success = target_to_obj < self.TARGET_RADIUS
+        reward = torch.where(
+            success, torch.tensor(10.0, device=self.device), reward)
+        return reward
 
 
 # Task registry
