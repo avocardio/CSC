@@ -615,27 +615,21 @@ class ShelfPlaceEnv(CWGPUEnvBase):
 
     def _randomize_state(self, idx: torch.Tensor):
         n = len(idx)
+        # Object position (randomized on table)
         obj_low = self.OBJ_LOW.to(self.device)
         obj_high = self.OBJ_HIGH.to(self.device)
-        goal_low = self.GOAL_LOW.to(self.device)
-        goal_high = self.GOAL_HIGH.to(self.device)
-        rand = torch.rand(n, 6, device=self.device)
-        obj_pos = obj_low + rand[:, :3] * (obj_high - obj_low)
-        goal_pos = goal_low + rand[:, 3:] * (goal_high - goal_low)
-        # Ensure min distance
-        for _ in range(5):
-            xy_dist = torch.norm(obj_pos[:, :2] - goal_pos[:, :2], dim=-1)
-            need = xy_dist < 0.1
-            if not need.any():
-                break
-            goal_pos[need] = goal_low + torch.rand(
-                need.sum(), 3, device=self.device) * (goal_high - goal_low)
-
+        rand = torch.rand(n, 3, device=self.device)
+        obj_pos = obj_low + rand * (obj_high - obj_low)
         self.qpos[idx, self.OBJ_QPOS_START:self.OBJ_QPOS_START + 3] = obj_pos
         self.qpos[idx, self.OBJ_QPOS_START + 3] = 1.0
         self.qpos[idx, self.OBJ_QPOS_START + 4:self.OBJ_QPOS_START + 7] = 0.0
         self.obj_init_pos[idx] = obj_pos
-        self.target_pos[idx] = goal_pos
+        # Goal = shelf body pos + goal site offset [0,0,0.3]
+        # Shelf is static at XML default [0, 0.8, 0], shared across all envs
+        # (Can't move per-env in batched Warp since model is shared)
+        shelf_pos = torch.tensor([0.0, 0.8, 0.0], device=self.device)
+        goal_site_offset = torch.tensor([0.0, 0.0, 0.3], device=self.device)
+        self.target_pos[idx] = shelf_pos + goal_site_offset
 
     def _compute_reward(self, action: torch.Tensor,
                         obs: torch.Tensor) -> torch.Tensor:
@@ -698,7 +692,7 @@ class ShelfPlaceEnv(CWGPUEnvBase):
         if self.obj_bid < 0:
             return torch.zeros(self.n_envs, dtype=torch.bool, device=self.device)
         obj = self.xpos[:, self.obj_bid, :]
-        return torch.norm(obj - self.target_pos, dim=-1) < self.TARGET_RADIUS
+        return torch.norm(obj - self.target_pos, dim=-1) < 0.07  # official uses 0.07
 
 
 # ==============================================================================
@@ -978,12 +972,20 @@ class PushWallEnv(PushEnv):
     """Push with wall. Two-phase reward: push to midpoint, then to target.
 
     Faithful port of MetaWorld SawyerPushWallEnvV3 v2 reward.
+    Official uses geom("objGeom").xpos for object position (not body COM).
     """
     xml_file = 'sawyer_push_wall_v3.xml'
     OBJ_LOW = torch.tensor([-0.05, 0.60, 0.015])
     OBJ_HIGH = torch.tensor([0.05, 0.65, 0.015])
     GOAL_LOW = torch.tensor([-0.05, 0.85, 0.01])
     GOAL_HIGH = torch.tensor([0.05, 0.9, 0.02])
+
+    def _get_obj_obs(self) -> torch.Tensor:
+        # Push-wall uses geom xpos, not body COM
+        op = self.geom_xpos[:, self.obj_gid, :]
+        oq = self.xquat[:, self.obj_bid, :]
+        zeros = torch.zeros(self.n_envs, 7, device=self.device)
+        return torch.cat([op, oq, zeros], dim=-1)
 
     def _compute_reward(self, action: torch.Tensor,
                         obs: torch.Tensor) -> torch.Tensor:
@@ -1042,6 +1044,10 @@ class PushWallEnv(PushEnv):
             success, torch.tensor(10.0, device=self.device), reward)
         return reward
 
+    def _compute_success(self) -> torch.Tensor:
+        obj = self.geom_xpos[:, self.obj_gid, :]
+        return torch.norm(obj - self.target_pos, dim=-1) < 0.07  # official: 0.07
+
 
 # ==============================================================================
 # PUSH BACK  (push object toward robot instead of away)
@@ -1050,6 +1056,7 @@ class PushBackEnv(PushEnv):
     """Push object back toward robot. Different reward from forward push.
 
     Faithful port of MetaWorld SawyerPushBackEnvV3 v2 reward.
+    Uses geom xpos, custom caging with caging>0.95 threshold.
     """
     xml_file = 'sawyer_push_back_v3.xml'
     OBJ_LOW = torch.tensor([-0.1, 0.8, 0.02])   # obj starts FURTHER from robot
@@ -1057,6 +1064,13 @@ class PushBackEnv(PushEnv):
     GOAL_LOW = torch.tensor([-0.1, 0.6, 0.0199])  # goal is CLOSER to robot
     GOAL_HIGH = torch.tensor([0.1, 0.7, 0.0201])
     OBJ_RADIUS = 0.007
+
+    def _get_obj_obs(self) -> torch.Tensor:
+        # Push-back uses geom xpos, not body COM
+        op = self.geom_xpos[:, self.obj_gid, :]
+        oq = self.xquat[:, self.obj_bid, :]
+        zeros = torch.zeros(self.n_envs, 7, device=self.device)
+        return torch.cat([op, oq, zeros], dim=-1)
 
     def _compute_reward(self, action: torch.Tensor,
                         obs: torch.Tensor) -> torch.Tensor:
@@ -1073,7 +1087,8 @@ class PushBackEnv(PushEnv):
             target_to_obj, bounds=(0.0, self.TARGET_RADIUS),
             margin=target_to_obj_init, sigmoid='long_tail')
 
-        # Push-back uses its own simplified caging (not gripper_caging_reward)
+        # Push-back custom caging (simplified vs base gripper_caging_reward):
+        # Uses pad y-deltas, caging > 0.95 threshold, (caging+gripping)/2
         left = self._get_leftpad()
         right = self._get_rightpad()
         object_grasped = gripper_caging_reward(
@@ -1081,7 +1096,7 @@ class PushBackEnv(PushEnv):
             obj_radius=self.OBJ_RADIUS,
             pad_success_thresh=0.05,
             object_reach_radius=0.01,
-            xz_thresh=0.005,
+            xz_thresh=0.01,
             high_density=True,
         )
 
@@ -1099,6 +1114,10 @@ class PushBackEnv(PushEnv):
         reward = torch.where(
             success, torch.tensor(10.0, device=self.device), reward)
         return reward
+
+    def _compute_success(self) -> torch.Tensor:
+        obj = self.geom_xpos[:, self.obj_gid, :]
+        return torch.norm(obj - self.target_pos, dim=-1) < 0.07  # official: 0.07
 
 
 # Task registry

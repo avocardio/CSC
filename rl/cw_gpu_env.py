@@ -126,6 +126,7 @@ class CWGPUEnvBase:
         self.site_xpos = wp.to_torch(self.d.site_xpos)
         self.xpos = wp.to_torch(self.d.xpos)
         self.xquat = wp.to_torch(self.d.xquat)
+        self.geom_xpos = wp.to_torch(self.d.geom_xpos)
 
     def _setup_ids(self):
         """Look up body/site IDs. Subclasses can override to add task-specific ones."""
