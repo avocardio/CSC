@@ -241,8 +241,11 @@ class CWGPUEnvBase:
         self._randomize_state(all_idx)
 
         # Set mocap to initial hand position
+        # Compensate for MuJoCo Warp relaxation settling ~4cm lower than CPU MuJoCo
         init_hand = self._get_initial_hand_pos()
-        self.mocap_pos[:, 0, :] = init_hand
+        init_hand_adjusted = init_hand.clone()
+        init_hand_adjusted[2] += 0.04
+        self.mocap_pos[:, 0, :] = init_hand_adjusted
         self.mocap_quat[:, 0, :] = torch.tensor(
             [1.0, 0.0, 1.0, 0.0], device=self.device)
 
@@ -331,9 +334,11 @@ class CWGPUEnvBase:
 
         self._randomize_state(idx)
 
-        # Reset mocap for done envs
+        # Reset mocap for done envs (compensate for Warp relaxation offset)
         init_hand = self._get_initial_hand_pos()
-        self.mocap_pos[idx, 0, :] = init_hand
+        init_hand_adjusted = init_hand.clone()
+        init_hand_adjusted[2] += 0.04
+        self.mocap_pos[idx, 0, :] = init_hand_adjusted
         mocap_q = torch.tensor([1.0, 0.0, 1.0, 0.0], device=self.device)
         self.mocap_quat[idx, 0, :] = mocap_q
 
