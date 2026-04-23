@@ -123,7 +123,8 @@ class HammerEnv(CWGPUEnvBase):
         return self.HAND_INIT_POS.to(self.device)
 
     def _get_obj_obs(self) -> torch.Tensor:
-        # hammer_pos(3) + hammer_quat(4) + nail_pos(3) + nail_quat(4) = 14
+        # hammer_pos(3) + hammer_quat(4, wxyz) + nail_pos(3) + nail_quat(4, wxyz) = 14
+        # MetaWorld hammer keeps wxyz convention (2-object task layout)
         hp = self.xpos[:, self.hammer_bid, :]
         hq = self.xquat[:, self.hammer_bid, :]
         np_ = self.xpos[:, self.nail_bid, :]
@@ -227,9 +228,9 @@ class PushEnv(CWGPUEnvBase):
         return self.HAND_INIT_POS.to(self.device)
 
     def _get_obj_obs(self) -> torch.Tensor:
-        # obj_pos(3) + obj_quat(4) + 7 zeros (padded) = 14
+        # obj_pos(3) + obj_quat(4, xyzw) + 7 zeros (padded) = 14
         op = self.xpos[:, self.obj_bid, :]
-        oq = self.xquat[:, self.obj_bid, :]
+        oq = self.xquat[:, self.obj_bid, :])
         zeros = torch.zeros(self.n_envs, 7, device=self.device)
         return torch.cat([op, oq, zeros], dim=-1)
 
@@ -606,7 +607,7 @@ class ShelfPlaceEnv(CWGPUEnvBase):
     def _get_obj_obs(self) -> torch.Tensor:
         if self.obj_bid >= 0:
             op = self.xpos[:, self.obj_bid, :]
-            oq = self.xquat[:, self.obj_bid, :]
+            oq = self.xquat[:, self.obj_bid, :])
         else:
             op = torch.zeros(self.n_envs, 3, device=self.device)
             oq = torch.tensor([1, 0, 0, 0], device=self.device).expand(self.n_envs, 4)
@@ -731,7 +732,7 @@ class StickPullEnv(CWGPUEnvBase):
 
     def _get_obj_obs(self) -> torch.Tensor:
         stick_pos = self.xpos[:, self.stick_bid, :]
-        stick_quat = self.xquat[:, self.stick_bid, :]
+        stick_quat = self.xquat[:, self.stick_bid, :])
         insertion_pos = self.site_xpos[:, self.insertion_sid, :] \
             if self.insertion_sid >= 0 else torch.zeros(self.n_envs, 3, device=self.device)
         zeros = torch.zeros(self.n_envs, 4, device=self.device)
@@ -888,10 +889,10 @@ class PegUnplugSideEnv(CWGPUEnvBase):
         else:
             peg_pos = torch.zeros(self.n_envs, 3, device=self.device)
         if self.plug_bid >= 0:
-            plug_quat = self.xquat[:, self.plug_bid, :]
+            plug_quat = self.xquat[:, self.plug_bid, :])
         else:
             plug_quat = torch.tensor(
-                [1.0, 0.0, 0.0, 0.0], device=self.device).expand(self.n_envs, 4)
+                [0.0, 0.0, 0.0, 1.0], device=self.device).expand(self.n_envs, 4)
         zeros = torch.zeros(self.n_envs, 7, device=self.device)
         return torch.cat([peg_pos, plug_quat, zeros], dim=-1)
 
@@ -983,7 +984,7 @@ class PushWallEnv(PushEnv):
     def _get_obj_obs(self) -> torch.Tensor:
         # Push-wall uses geom xpos, not body COM
         op = self.geom_xpos[:, self.obj_gid, :]
-        oq = self.xquat[:, self.obj_bid, :]
+        oq = self.xquat[:, self.obj_bid, :])
         zeros = torch.zeros(self.n_envs, 7, device=self.device)
         return torch.cat([op, oq, zeros], dim=-1)
 
@@ -1068,7 +1069,7 @@ class PushBackEnv(PushEnv):
     def _get_obj_obs(self) -> torch.Tensor:
         # Push-back uses geom xpos, not body COM
         op = self.geom_xpos[:, self.obj_gid, :]
-        oq = self.xquat[:, self.obj_bid, :]
+        oq = self.xquat[:, self.obj_bid, :])
         zeros = torch.zeros(self.n_envs, 7, device=self.device)
         return torch.cat([op, oq, zeros], dim=-1)
 

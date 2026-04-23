@@ -174,6 +174,10 @@ class CWGPUEnvBase:
         with wp.ScopedDevice(str(self.device)):
             mjw.forward(self.m, self.d)
 
+    def _wxyz_to_xyzw(self, quat: torch.Tensor) -> torch.Tensor:
+        """Convert MuJoCo [w,x,y,z] quaternion to MetaWorld obs [x,y,z,w]."""
+        return torch.cat([quat[..., 1:], quat[..., :1]], dim=-1)
+
     # ---- Task-specific methods (subclasses override) ----
 
     def _get_obj_positions(self) -> torch.Tensor:
