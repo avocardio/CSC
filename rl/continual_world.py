@@ -212,7 +212,22 @@ class SACAgent:
         # CL state
         self.ewc_fisher = {}
         self.ewc_params = {}
-        self.replay_store = TaskReplayStore(device) if 'replay' in method else None
+        self.use_replay = method in ('replay', 'ewc_replay', 'csc')
+        self.replay_store = TaskReplayStore(device) if self.use_replay else None
+
+        # CSC: compression importance + gradient scaling
+        self.use_csc = method == 'csc'
+        self.gamma_comp = 0.01
+        self.grad_scale_beta = 1.0
+        if self.use_csc:
+            self.importance = nn.ParameterList([
+                nn.Parameter(torch.full((256,), 8.0, device=device))
+                for _ in range(4)
+            ])
+            self.imp_opt = torch.optim.Adam(self.importance.parameters(), lr=0.01)
+            self.accumulated_importance = [
+                torch.zeros(256, device=device) for _ in range(4)
+            ]
 
     @property
     def alpha(self):
@@ -278,9 +293,25 @@ class SACAgent:
                 for n, p in self.actor.named_parameters() if n in self.ewc_fisher
             )
             actor_loss = actor_loss + self.cl_reg_coef * ewc_pen
+        if self.use_csc:
+            comp_loss = sum(b.clamp(min=0).mean() for b in self.importance) / len(self.importance)
+            actor_loss = actor_loss + self.gamma_comp * comp_loss
         self.actor_opt.zero_grad()
+        if self.use_csc:
+            self.imp_opt.zero_grad()
         actor_loss.backward()
+        if self.use_csc and self.grad_scale_beta > 0:
+            layers = [self.actor.fc1, self.actor.fc2, self.actor.fc3, self.actor.fc4]
+            for i, layer in enumerate(layers):
+                acc = self.accumulated_importance[i]
+                scale = 1.0 / (1.0 + self.grad_scale_beta * acc)
+                if layer.weight.grad is not None:
+                    layer.weight.grad *= scale.unsqueeze(1)
+                if layer.bias is not None and layer.bias.grad is not None:
+                    layer.bias.grad *= scale
         self.actor_opt.step()
+        if self.use_csc:
+            self.imp_opt.step()
 
         # Alpha update (separate optimizer)
         alpha_loss = -(self.log_alpha.exp() * (lp2 + self.target_entropy).detach()).mean()
@@ -323,6 +354,11 @@ class SACAgent:
         self.compute_ewc_fisher(buffer)
         if self.replay_store:
             self.replay_store.add_task(buffer, self.replay_per_task)
+        if self.use_csc:
+            with torch.no_grad():
+                for i, imp in enumerate(self.importance):
+                    self.accumulated_importance[i] = torch.max(
+                        self.accumulated_importance[i], imp.data.clamp(min=0))
 
 
 # ============================================================
