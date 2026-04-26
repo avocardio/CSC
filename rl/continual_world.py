@@ -229,6 +229,23 @@ class SACAgent:
                 torch.zeros(256, device=device) for _ in range(4)
             ]
 
+        # L2 / MAS regularization
+        self.use_l2 = method == 'l2'
+        self.use_mas = method == 'mas'
+        self.reg_params = {}
+        self.mas_importance = {}
+
+        # PackNet: weight ownership + pruning
+        self.use_packnet = method == 'packnet'
+        if self.use_packnet:
+            self.pn_owner = {}
+            self.pn_freeze_bn = False
+            for n, p in self.actor.named_parameters():
+                if 'weight' in n and p.dim() == 2:
+                    self.pn_owner[n] = torch.zeros_like(p, dtype=torch.int32)
+            self.pn_retrain_steps = 100000
+            self._current_task = 0
+
     @property
     def alpha(self):
         return self.log_alpha.exp().item()
@@ -243,12 +260,14 @@ class SACAgent:
             a, _, _ = self.actor_cpu.sample(obs_t)
         return a.numpy().flatten()
 
-    def reset_for_new_task(self):
+    def reset_for_new_task(self, task_idx=0):
         """Reset optimizer state on task change (CW convention)."""
         lr = self.actor_opt.param_groups[0]['lr']
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = torch.optim.Adam(
             list(self.q1.parameters()) + list(self.q2.parameters()), lr=lr)
+        if self.use_packnet:
+            self._current_task = task_idx
 
     def update(self, buffer):
         # Mix replay if available
@@ -296,6 +315,16 @@ class SACAgent:
         if self.use_csc:
             comp_loss = sum(b.clamp(min=0).mean() for b in self.importance) / len(self.importance)
             actor_loss = actor_loss + self.gamma_comp * comp_loss
+        if self.use_l2 and self.reg_params:
+            l2_loss = sum(
+                (p - self.reg_params[n]).pow(2).sum()
+                for n, p in self.actor.named_parameters() if n in self.reg_params)
+            actor_loss = actor_loss + self.cl_reg_coef * l2_loss
+        if self.use_mas and self.reg_params:
+            mas_loss = sum(
+                (self.mas_importance[n] * (p - self.reg_params[n]).pow(2)).sum()
+                for n, p in self.actor.named_parameters() if n in self.mas_importance)
+            actor_loss = actor_loss + self.cl_reg_coef * mas_loss
         self.actor_opt.zero_grad()
         if self.use_csc:
             self.imp_opt.zero_grad()
@@ -309,6 +338,15 @@ class SACAgent:
                     layer.weight.grad *= scale.unsqueeze(1)
                 if layer.bias is not None and layer.bias.grad is not None:
                     layer.bias.grad *= scale
+        if self.use_packnet:
+            for n, p in self.actor.named_parameters():
+                if p.grad is None:
+                    continue
+                if n in self.pn_owner:
+                    mask = (self.pn_owner[n] == self._current_task).float()
+                    p.grad *= mask
+                elif self.pn_freeze_bn and ('bias' in n or 'ln' in n):
+                    p.grad.zero_()
         self.actor_opt.step()
         if self.use_csc:
             self.imp_opt.step()
@@ -350,7 +388,7 @@ class SACAgent:
             self.ewc_fisher[n] = self.ewc_fisher.get(n, torch.zeros_like(fisher[n])) + fisher[n]
         print(f"    EWC Fisher computed: max={max(f.max().item() for f in fisher.values()):.4f}")
 
-    def on_task_end(self, buffer):
+    def on_task_end(self, buffer, task_idx=0, n_tasks=10):
         self.compute_ewc_fisher(buffer)
         if self.replay_store:
             self.replay_store.add_task(buffer, self.replay_per_task)
@@ -359,6 +397,65 @@ class SACAgent:
                 for i, imp in enumerate(self.importance):
                     self.accumulated_importance[i] = torch.max(
                         self.accumulated_importance[i], imp.data.clamp(min=0))
+        if self.use_l2:
+            for n, p in self.actor.named_parameters():
+                self.reg_params[n] = p.data.clone()
+        if self.use_mas:
+            self._compute_mas_importance(buffer)
+        if self.use_packnet:
+            self._packnet_prune(task_idx, n_tasks)
+            self._packnet_retrain(buffer)
+
+    def _compute_mas_importance(self, buffer, n_batches=10, bs=256):
+        params = [(n, p) for n, p in self.actor.named_parameters() if p.requires_grad]
+        for n, p in params:
+            self.reg_params[n] = p.data.clone()
+        importance = {n: torch.zeros_like(p) for n, p in params}
+        for _ in range(n_batches):
+            s, _, _, _, _ = buffer.sample(bs)
+            mu, _ = self.actor(s)
+            loss = mu.pow(2).sum()
+            self.actor.zero_grad()
+            loss.backward()
+            for n, p in params:
+                if p.grad is not None:
+                    importance[n] += p.grad.data.abs()
+        for n in importance:
+            imp = (importance[n] / n_batches).clamp(min=1e-5)
+            self.mas_importance[n] = self.mas_importance.get(n, torch.zeros_like(imp)) + imp
+
+    def _packnet_prune(self, task_idx, n_tasks):
+        tasks_left = n_tasks - task_idx - 1
+        if tasks_left <= 0:
+            return
+        prune_perc = tasks_left / (tasks_left + 1)
+        with torch.no_grad():
+            for n, p in self.actor.named_parameters():
+                if n not in self.pn_owner:
+                    continue
+                owner = self.pn_owner[n]
+                mask = (owner == task_idx)
+                vals = p[mask].abs()
+                if vals.numel() == 0:
+                    continue
+                k = int(vals.numel() * prune_perc)
+                if k == 0:
+                    continue
+                threshold = vals.sort()[0][k]
+                prune_mask = mask & (p.abs() <= threshold)
+                p[prune_mask] = 0.0
+                owner[prune_mask] = task_idx + 1
+        if task_idx == 0:
+            self.pn_freeze_bn = True
+        print(f"    PackNet: pruned {prune_perc:.1%} of task {task_idx} weights")
+
+    def _packnet_retrain(self, buffer):
+        lr = self.actor_opt.param_groups[0]['lr']
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
+        for _ in range(self.pn_retrain_steps):
+            self.update(buffer)
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
+        print(f"    PackNet: retrained for {self.pn_retrain_steps} steps")
 
 
 # ============================================================
@@ -426,7 +523,7 @@ def train(method, tasks, steps_per_task=1_000_000, seed=42,
 
         # Reset buffer + optimizer on task change (CW convention)
         buffer.reset()
-        agent.reset_for_new_task()
+        agent.reset_for_new_task(task_idx)
         agent.sync_cpu()
 
         t0 = time.time()
@@ -480,7 +577,7 @@ def train(method, tasks, steps_per_task=1_000_000, seed=42,
                       f"alpha={agent.alpha:.3f}", flush=True)
 
         env.close()
-        agent.on_task_end(buffer)
+        agent.on_task_end(buffer, task_idx=task_idx, n_tasks=len(tasks))
 
     # Final eval
     print(f"\n{'='*60}")
@@ -500,8 +597,8 @@ def train(method, tasks, steps_per_task=1_000_000, seed=42,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--method', required=True,
-                        choices=['finetune', 'ewc', 'ewc_replay', 'replay',
-                                 'csc'])
+                        choices=['finetune', 'l2', 'ewc', 'mas', 'ewc_replay',
+                                 'replay', 'packnet', 'csc'])
     parser.add_argument('--steps_per_task', type=int, default=1_000_000)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--cl_reg_coef', type=float, default=1e4)
