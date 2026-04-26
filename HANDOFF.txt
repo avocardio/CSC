@@ -1,0 +1,84 @@
+HANDOFF: Continual Self-Compression (CSC) RL Experiments
+=========================================================
+Written: 2026-04-26 by Claude Opus 4.6 session
+
+WHAT'S RUNNING RIGHT NOW
+-------------------------
+Job 1950627 on Clariden: CPU CW10 benchmark
+- 12 parallel experiments: finetune, ewc, replay, csc × seeds 42, 123, 456
+- 1M steps per task, 10 CW10 tasks, standard CPU MetaWorld
+- Script: scripts/cpu_cw10_benchmark.sbatch
+- Logs: checkpoints/cpu_{method}_s{seed}.log
+- Started 2026-04-26 16:46, 12h job limit
+- At ~85 sps, each experiment does ~4 tasks in 12h → needs a second chained job
+- The job does NOT have checkpointing built in yet for resume. The continual_world.py
+  script runs all 10 tasks sequentially. If it runs out of time, partial results are in
+  the logs but training state is lost. Need to add checkpointing to continual_world.py.
+
+WHAT NEEDS TO HAPPEN NEXT
+--------------------------
+1. Check job 1950627 results when it finishes (~04:46 tomorrow)
+2. Add per-task checkpointing to rl/continual_world.py (like cl_experiment.py has)
+3. Submit second job to resume from where job 1 stopped
+4. Add remaining methods to benchmark sbatch: L2, MAS, PackNet (code is in continual_world.py but not in the sbatch script)
+5. Run with 5 seeds (currently only 3) for paper
+6. Collect results and compare against CW paper baselines
+
+KEY DECISIONS
+-------------
+- USE CPU MetaWorld (not GPU MuJoCo Warp) for paper numbers
+  - GPU port only works on 5/10 tasks (grasping physics broken)
+  - Reviewer agent strongly recommended CPU for publishable results
+  - CPU runs at ~85 sps, all 10 tasks work
+  - 288 ARM cores per Clariden node → massive parallelism
+
+- CW paper hyperparams (verified against official code):
+  - 4x256 MLP, LayerNorm+tanh first layer, LeakyReLU rest
+  - lr=1e-3, gamma=0.99, polyak=0.995, batch=128, buffer=1M
+  - EWC lambda=1e4, L2 lambda=1e5, MAS lambda=1e4
+  - PackNet retrain=100K steps, prune ratio=tasks_left/(tasks_left+1)
+  - 1M steps per task, episode length 200
+
+- CSC best hyperparams (from GPU sweep, 16 configs):
+  - gamma_comp=0.01, grad_scale_beta=5.0 → zero forgetting on 4-task subset
+  - Also good: gamma_comp=0.05, beta=0.5 → 73.4% perf, 2.1% forgetting
+
+KEY FILES
+---------
+rl/continual_world.py    — CPU CW10 implementation (finetune, ewc, replay, csc, l2, mas, packnet)
+rl/cl_experiment.py      — GPU CW implementation (has checkpointing, used for earlier experiments)
+rl/cw_tasks.py           — GPU MuJoCo Warp task implementations (5/10 work)
+rl/cw_gpu_env.py         — GPU env base class
+rl/cw_reward_utils.py    — Vectorized reward utilities
+scripts/cpu_cw10_benchmark.sbatch — The benchmark script currently running
+scripts/submit_experiment.sh      — Job chaining for GPU experiments
+scripts/collect_results.py        — Results aggregation
+
+BUGS FIXED (GPU version, for reference)
+----------------------------------------
+1. geom_margin=0 → mjDSBL_NATIVECCD (restored contact physics for grasping)
+2. Auto-reset missing physics relaxation (save/restore for alive envs)
+3. Hand z-position 4cm offset (compensated in mocap init)
+4. 5 task rewards completely wrong (push-wall, push-back, shelf-place, stick-pull, peg-unplug-side)
+5. geom_xpos vs body xpos for push-wall/push-back observations
+6. Eval episodes 16→64 for statistical reliability
+7. Architecture 3→4 hidden layers, EWC lambda 100→10000
+
+SSH CONNECTION
+--------------
+- Need NordVPN (Swiss server) on PC — ISP blocks Swiss academic IPs
+- Use ssh-agent: eval "$(ssh-agent -s)" && ssh-add ~/.ssh/cscs-key && ssh clariden "cmd"
+- Or wrapper: /tmp/cscs-ssh.sh "cmd" (but this is ephemeral)
+- Keys expire 24h, user runs: ! cscs-key sign --headless
+- Mac works without VPN, has cscs-key CLI at /usr/local/bin/cscs-key
+
+EARLIER RESULTS (250K steps, GPU, pre-fix — for reference only)
+---------------------------------------------------------------
+CSC:      avg_perf=0.200, forgetting=0.076, BWT=+0.035 (faucet-close 100%, window-close 100%)
+EWC:      avg_perf=0.069, forgetting=0.167 (window-close 43.8%)
+Replay:   avg_perf=0.031, forgetting=0.194 (faucet-close 31.2%)
+Finetune: avg_perf=0.013, forgetting=0.188
+PackNet:  avg_perf=0.013, forgetting=0.201
+
+These are NOT paper-ready (only 5/10 tasks worked, 250K not 1M, single seed).
+The CPU benchmark running now will produce the real numbers.
