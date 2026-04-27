@@ -320,6 +320,8 @@ class SACAgent:
                  replay_ratio: float = 0.5, replay_per_task: int = 10_000,
                  gamma_comp: float = 1e-3, grad_scale_beta: float = 1.0,
                  bit_floor: float = 1.0, reset_alpha: bool = False,
+                 shared_alpha: bool = False, alpha_clip: float = 2.0,
+                 bc_coef: float = 1.0,
                  device: str = DEVICE):
         self.device = device
         self.method = method
@@ -337,12 +339,18 @@ class SACAgent:
         self.lr = lr
         self.lr_quant = lr_quant
 
-        self.use_csc = method == 'csc'
+        self.use_csc = method in ('csc', 'csc_clonex')
+        # SAC-replay: replay batch enters actor/critic loss directly.
         self.use_replay = method in ('replay', 'csc', 'ewc_replay')
+        # BC-replay (ClonEx-style): old data feeds BC loss only, never SAC actor/critic.
+        self.use_bc_replay = method in ('clonex', 'csc_clonex')
         self.use_ewc = method in ('ewc', 'ewc_replay')
         self.use_mas = method == 'mas'
         self.use_l2 = method == 'l2'
         self.use_packnet = method == 'packnet'
+        self.shared_alpha = shared_alpha
+        self.alpha_clip = float(alpha_clip)
+        self.bc_coef = float(bc_coef)
 
         self.actor = CWActor(n_tasks, quantize=self.use_csc).to(device)
         self.critic = CWCritic(n_tasks).to(device)        # contains twin Q1/Q2
@@ -350,9 +358,19 @@ class SACAgent:
         self.critic_t.load_state_dict(self.critic.state_dict())
         for p in self.critic_t.parameters(): p.requires_grad = False
 
-        # Per-task log_alpha, never reset (CW default)
+        # log_alpha: per-task vector (CW default) or single scalar if shared_alpha.
+        # target_entropy follows CW formula act_dim * log(σ √(2πe)) with σ=0.089
+        # which equals -act_dim. We keep -act_dim as the default (identical numeric).
         self.target_entropy = -float(ACT_DIM)
-        self.log_alpha = nn.Parameter(torch.zeros(n_tasks, device=device))
+        if self.shared_alpha:
+            self.log_alpha = nn.Parameter(torch.zeros(1, device=device))
+        else:
+            self.log_alpha = nn.Parameter(torch.zeros(n_tasks, device=device))
+
+        # Frozen actor snapshots for BC distillation (filled per task end).
+        self.bc_snapshots: dict[int, dict] = {}
+        # Per-task observation pool for BC sampling (raw states only, no rewards).
+        self.bc_states: dict[int, torch.Tensor] = {} if self.use_bc_replay else {}
 
         self._build_optimizers()
 
@@ -395,7 +413,8 @@ class SACAgent:
         self._build_optimizers()
         if self.reset_alpha:
             with torch.no_grad():
-                self.log_alpha.data[task_idx] = 0.0
+                idx = 0 if self.shared_alpha else task_idx
+                self.log_alpha.data[idx] = 0.0
         self._current_task = task_idx
 
     @property
@@ -404,8 +423,10 @@ class SACAgent:
 
     # ---- update ----
     def update(self, buffer: ReplayBuffer):
-        # Sample batch (current task only or mixed)
-        if self.replay_store and self.replay_store.n_tasks > 0:
+        # Sample batch. SAC-replay (use_replay) mixes current+old samples into
+        # the SAC actor/critic loss. BC-replay (use_bc_replay) keeps SAC pure
+        # current-task and adds a separate distillation term on old states only.
+        if self.use_replay and self.replay_store and self.replay_store.n_tasks > 0:
             n_curr = int(self.batch_size * (1 - self.replay_ratio))
             n_rep = self.batch_size - n_curr
             sc, ac, rc, nsc, dc, tc = buffer.sample(n_curr)
@@ -416,7 +437,10 @@ class SACAgent:
         else:
             s, a, r, ns, d, t = buffer.sample(self.batch_size)
 
-        alpha_per_sample = self.log_alpha.detach().exp()[t].unsqueeze(-1)  # (B, 1)
+        if self.shared_alpha:
+            alpha_per_sample = self.log_alpha.detach().exp().expand(t.shape[0]).unsqueeze(-1)
+        else:
+            alpha_per_sample = self.log_alpha.detach().exp()[t].unsqueeze(-1)  # (B, 1)
 
         # ---- critic update ----
         with torch.no_grad():
@@ -437,6 +461,8 @@ class SACAgent:
 
         if self.use_csc:
             actor_loss = actor_loss + self.gamma_comp * self.actor.compression_loss()
+        if self.use_bc_replay and self.bc_snapshots:
+            actor_loss = actor_loss + self.bc_coef * self._bc_loss()
         if self.use_ewc and self.ewc_fisher:
             ewc_pen = sum(
                 (self.ewc_fisher[n] * (p - self.ewc_params[n]).pow(2)).sum()
@@ -482,24 +508,32 @@ class SACAgent:
                         # produce unreproducible seed-dependent NaN crashes.
                         layer.quantizer.exponent.data.clamp_(min=-20.0, max=20.0)
 
-        # ---- alpha update (CURRENT-task slice only) ----
-        # Note: with multi-head + per-task log_alpha, computing the alpha update
-        # over the mixed (current + replay) batch lets old-task alphas keep
-        # receiving gradient. For an old task whose head has converged near the
-        # log_std clamp (so the policy is near-deterministic), lp(sample) becomes
-        # large positive and the gradient pushes log_alpha[old] up unboundedly,
-        # producing alpha=1e6 nonsense. The fix: only train alpha on the
-        # current-task slice of the batch. This matches the spirit of CW's
-        # reservoir replay where the data is dominated by the current task.
-        cur_mask = (t == self._current_task)
-        if cur_mask.any():
-            cur_lp = lp2.squeeze(-1)[cur_mask]
-            cur_alpha = self.log_alpha[self._current_task].exp()
-            alpha_loss = -(cur_alpha *
-                           (cur_lp + self.target_entropy).detach()).mean()
+        # ---- alpha update ----
+        # With shared_alpha: single scalar trained on the full batch (standard SAC).
+        # With per-task log_alpha + replay: train only on the current-task slice
+        # to avoid the alpha-explosion pathology (saturated old-head log_std →
+        # large lp on replay samples → unbounded log_alpha[old]). After each step
+        # we clip log_alpha ∈ [-self.alpha_clip - 5, self.alpha_clip] for safety.
+        if self.shared_alpha:
+            alpha_loss = -(self.log_alpha[0].exp() *
+                           (lp2.squeeze(-1) + self.target_entropy).detach()).mean()
             self.alpha_opt.zero_grad(set_to_none=True)
             alpha_loss.backward()
             self.alpha_opt.step()
+        else:
+            cur_mask = (t == self._current_task)
+            if cur_mask.any():
+                cur_lp = lp2.squeeze(-1)[cur_mask]
+                cur_alpha = self.log_alpha[self._current_task].exp()
+                alpha_loss = -(cur_alpha *
+                               (cur_lp + self.target_entropy).detach()).mean()
+                self.alpha_opt.zero_grad(set_to_none=True)
+                alpha_loss.backward()
+                self.alpha_opt.step()
+        # Hard clip log_alpha to prevent runaway (covers any residual instability).
+        with torch.no_grad():
+            self.log_alpha.data.clamp_(min=-self.alpha_clip - 5.0,
+                                       max=self.alpha_clip)
 
         # ---- target update ----
         with torch.no_grad():
@@ -543,6 +577,11 @@ class SACAgent:
                 self.l2_params[n] = p.data.clone()
         if self.replay_store is not None:
             self.replay_store.add_task(buffer, self.replay_per_task)
+        if self.use_bc_replay:
+            # Snapshot frozen actor for ClonEx-style BC distillation.
+            # Also retain a state pool from this task for BC sampling.
+            self._snapshot_frozen_actor(task_idx)
+            self._collect_bc_states(buffer, task_idx)
         if self.use_csc:
             with torch.no_grad():
                 for i, layer in enumerate(self.actor.core_layers()):
@@ -553,6 +592,41 @@ class SACAgent:
             self._packnet_retrain(buffer)
             if task_idx == 0:
                 self.pn_freeze_bias = True
+
+    def _snapshot_frozen_actor(self, task_idx: int):
+        """Deep-copy the actor at end of task. Frozen copies are kept on the
+        same device, in eval mode, with requires_grad=False — used as BC targets."""
+        import copy
+        frozen = copy.deepcopy(self.actor).eval()
+        for p in frozen.parameters():
+            p.requires_grad = False
+        self.bc_snapshots[task_idx] = frozen
+
+    def _collect_bc_states(self, buffer: ReplayBuffer, task_idx: int,
+                           n: int = 10_000):
+        """Pull n random states from this task's online buffer for BC sampling later."""
+        snap = buffer.snapshot(n)
+        self.bc_states[task_idx] = snap[0].clone()              # states only
+
+    def _bc_loss(self) -> torch.Tensor:
+        """Mean-squared mismatch between current actor and frozen old actors on
+        each old task's state pool. Sum over old tasks. Returns 0 tensor when
+        no snapshots yet."""
+        if not self.bc_snapshots:
+            return torch.zeros((), device=self.device)
+        total = torch.zeros((), device=self.device)
+        n_per_task = max(self.batch_size // max(len(self.bc_snapshots), 1), 32)
+        for k, frozen in self.bc_snapshots.items():
+            pool = self.bc_states.get(k)
+            if pool is None or pool.shape[0] == 0:
+                continue
+            idx = torch.randint(0, pool.shape[0], (n_per_task,), device=self.device)
+            obs = pool[idx]
+            mu_cur, ls_cur = self.actor(obs, k)
+            with torch.no_grad():
+                mu_old, ls_old = frozen(obs, k)
+            total = total + F.mse_loss(mu_cur, mu_old) + F.mse_loss(ls_cur, ls_old)
+        return total
 
     def _compute_ewc_fisher(self, buffer: ReplayBuffer, task_idx: int,
                             n_batches: int = 10, bs: int = 256):
@@ -785,7 +859,9 @@ def train(method: str, tasks: list[str], steps_per_task: int, seed: int,
           cl_reg_coef: float, replay_ratio: float, replay_per_task: int,
           gamma_comp: float, grad_scale_beta: float, lr_quant: float,
           bit_floor: float, reset_alpha: bool,
-          ckpt_path: str | None, eval_every: int = 100_000):
+          ckpt_path: str | None, eval_every: int = 100_000,
+          shared_alpha: bool = False, alpha_clip: float = 2.0,
+          bc_coef: float = 1.0):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -797,7 +873,10 @@ def train(method: str, tasks: list[str], steps_per_task: int, seed: int,
                      grad_scale_beta=grad_scale_beta,
                      lr_quant=lr_quant,
                      bit_floor=bit_floor,
-                     reset_alpha=reset_alpha)
+                     reset_alpha=reset_alpha,
+                     shared_alpha=shared_alpha,
+                     alpha_clip=alpha_clip,
+                     bc_coef=bc_coef)
     buffer = ReplayBuffer()
 
     results: dict = {}
@@ -894,7 +973,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--method', required=True,
                    choices=['finetune', 'l2', 'ewc', 'mas', 'replay',
-                            'ewc_replay', 'packnet', 'csc'])
+                            'ewc_replay', 'packnet', 'csc',
+                            'clonex', 'csc_clonex'])
     p.add_argument('--steps_per_task', type=int, default=1_000_000)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--cl_reg_coef', type=float, default=1e4,
@@ -906,6 +986,12 @@ def main():
     p.add_argument('--lr_quant', type=float, default=0.5)
     p.add_argument('--bit_floor', type=float, default=1.0)
     p.add_argument('--reset_alpha', action='store_true')
+    p.add_argument('--shared_alpha', action='store_true',
+                   help='Single scalar log_alpha shared across tasks (Phase 2 fix)')
+    p.add_argument('--alpha_clip', type=float, default=2.0,
+                   help='Hard clip log_alpha to [-clip-5, clip] (default 2.0).')
+    p.add_argument('--bc_coef', type=float, default=1.0,
+                   help='ClonEx BC distillation weight (used by clonex/csc_clonex).')
     p.add_argument('--tasks', default='cw10', choices=['cw10', 'cw20', 'cw_subset'])
     p.add_argument('--eval_every', type=int, default=100_000)
     p.add_argument('--ckpt', default='', help='checkpoint path (optional)')
@@ -932,7 +1018,9 @@ def main():
                     args.cl_reg_coef, args.replay_ratio, args.replay_per_task,
                     args.gamma_comp, args.grad_scale_beta,
                     args.lr_quant, args.bit_floor, args.reset_alpha,
-                    ckpt_path=ckpt, eval_every=args.eval_every)
+                    ckpt_path=ckpt, eval_every=args.eval_every,
+                    shared_alpha=args.shared_alpha,
+                    alpha_clip=args.alpha_clip, bc_coef=args.bc_coef)
 
     final_path = out_path.replace('.pt', '_final.json')
     with open(final_path, 'w') as f:
