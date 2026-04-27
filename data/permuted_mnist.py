@@ -22,9 +22,8 @@ class PermutedMNISTTask(Dataset):
         x, y = self.dataset[idx]
         # x is (1, 28, 28), flatten, permute, reshape
         flat = x.view(-1)[self.permutation]
-        # Reshape to (1, 28, 28) for conv or keep flat for MLP
         x_perm = flat.view(1, 28, 28)
-        return x_perm, y, self.task_id
+        return x_perm, y
 
 
 class PermutedMNIST:
@@ -39,9 +38,9 @@ class PermutedMNIST:
         transform = T.Compose([T.ToTensor(), T.Normalize((0.1307,), (0.3081,))])
 
         self.train_dataset = torchvision.datasets.MNIST(
-            root=data_root, train=True, download=False, transform=transform)
+            root=data_root, train=True, download=True, transform=transform)
         self.test_dataset = torchvision.datasets.MNIST(
-            root=data_root, train=False, download=False, transform=transform)
+            root=data_root, train=False, download=True, transform=transform)
 
         # Generate permutations
         rng = np.random.RandomState(seed)

@@ -37,8 +37,8 @@ METHOD_STYLE = {
 }
 
 
-def load_results(ckpt_dir: str) -> dict:
-    """Group JSON results by (method, num_tasks). Each group has a list of dicts."""
+def load_results(ckpt_dir: str, dataset: str = 'cifar100') -> dict:
+    """Group JSON results by (method, num_tasks), filtered to a single dataset."""
     groups = defaultdict(list)
     for f in sorted(glob.glob(os.path.join(ckpt_dir, 'sup_*.json'))):
         try:
@@ -47,6 +47,10 @@ def load_results(ckpt_dir: str) -> dict:
         except Exception as e:
             print(f'  skip {f}: {e}'); continue
         cfg = d.get('config', {})
+        # Backward-compat: old JSONs without 'dataset' key are CIFAR-100
+        ds = cfg.get('dataset', 'cifar100')
+        if ds != dataset:
+            continue
         key = (cfg.get('method', 'unknown'), cfg.get('num_tasks', 0))
         groups[key].append(d)
     return groups
@@ -83,15 +87,17 @@ def make_pareto_plot(groups: dict, num_tasks: int, out_pdf: str, out_png: str):
                     label=f"{style['label']} (n={agg['n']})",
                     capsize=3, linewidth=1.4, markeredgecolor='black',
                     markeredgewidth=0.5)
-    ax.set_xlabel('Capacity used (\\% of 32-bit precision)')
-    ax.set_ylabel('Avg accuracy across all tasks (\\%)')
+    ax.set_xlabel('Capacity used (% of 32-bit precision)')
+    ax.set_ylabel('Avg accuracy across all tasks (%)')
     ax.set_title(f'Split CIFAR-100, {num_tasks} tasks')
-    ax.set_xlim(-5, 110)
+    ax.set_xlim(-3, 110)
+    ax.set_ylim(20, 95)
     ax.grid(alpha=0.25)
-    # Pareto frontier hint: better is upper-left (high acc, low capacity)
-    ax.annotate('better', xy=(8, 80), xytext=(50, 88), fontsize=9,
-                color='#666666',
-                arrowprops=dict(arrowstyle='->', color='#666666', lw=1))
+    # "better" hint in corner pointing up-left
+    ax.annotate('', xy=(5, 92), xytext=(25, 80),
+                arrowprops=dict(arrowstyle='->', color='#666666', lw=1.2))
+    ax.text(15, 82, 'better', color='#666666', fontsize=9, rotation=35,
+            ha='center', va='center')
     ax.legend(loc='lower right', frameon=True, ncol=1)
     plt.tight_layout()
     fig.savefig(out_pdf); fig.savefig(out_png, dpi=200)
@@ -128,22 +134,24 @@ def main():
     p.add_argument('--ckpt_dir', default='checkpoints')
     p.add_argument('--out_dir', default='csc_paper')
     p.add_argument('--num_tasks', type=int, default=10)
+    p.add_argument('--dataset', default='cifar100', choices=['cifar100', 'pmnist'])
     args = p.parse_args()
 
     os.makedirs(os.path.join(args.out_dir, 'figures'), exist_ok=True)
     os.makedirs(os.path.join(args.out_dir, 'tables'), exist_ok=True)
 
-    groups = load_results(args.ckpt_dir)
+    groups = load_results(args.ckpt_dir, dataset=args.dataset)
     print(f'Found {sum(len(v) for v in groups.values())} runs across '
           f'{len(groups)} (method, num_tasks) groups.')
     for k, v in sorted(groups.items()):
         print(f'  {k}: n={len(v)}')
 
+    suffix = '' if args.dataset == 'cifar100' else f'_{args.dataset}'
     make_pareto_plot(groups, args.num_tasks,
-                     os.path.join(args.out_dir, 'figures', 'pareto.pdf'),
-                     os.path.join(args.out_dir, 'figures', 'pareto.png'))
+                     os.path.join(args.out_dir, 'figures', f'pareto{suffix}.pdf'),
+                     os.path.join(args.out_dir, 'figures', f'pareto{suffix}.png'))
     make_results_table(groups, args.num_tasks,
-                       os.path.join(args.out_dir, 'tables', 'main.tex'))
+                       os.path.join(args.out_dir, 'tables', f'main{suffix}.tex'))
 
 
 if __name__ == '__main__':

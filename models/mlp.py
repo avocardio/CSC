@@ -46,25 +46,30 @@ class QuantizedLinear(nn.Module):
 
 
 class QuantizedMLP(nn.Module):
-    """MLP with differentiable quantization and multi-head output."""
+    """MLP with differentiable quantization. Supports single-head (PMNIST) or
+    multi-head (Split CIFAR-style). For PMNIST set num_tasks=1; the same head
+    is then used regardless of the task_id passed to forward."""
 
     def __init__(self, input_size=784, hidden_size=256, num_classes=10,
                  num_tasks=10, granularity=CompressionGranularity.CHANNEL,
-                 init_bit_depth=8.0):
+                 init_bit_depth=8.0, quantize=True):
         super().__init__()
         self.fc1 = QuantizedLinear(input_size, hidden_size, granularity=granularity,
-                                   init_bit_depth=init_bit_depth)
+                                   init_bit_depth=init_bit_depth, quantize=quantize)
         self.fc2 = QuantizedLinear(hidden_size, hidden_size, granularity=granularity,
-                                   init_bit_depth=init_bit_depth)
+                                   init_bit_depth=init_bit_depth, quantize=quantize)
         self.heads = nn.ModuleList([
             nn.Linear(hidden_size, num_classes) for _ in range(num_tasks)
         ])
         self.num_tasks = num_tasks
+        self.single_head = num_tasks == 1
 
     def forward(self, x, task_id=None):
         x = x.view(x.size(0), -1)  # Flatten
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
+        if self.single_head:
+            return self.heads[0](x)
         if task_id is not None:
             return self.heads[task_id](x)
         return torch.cat([h(x) for h in self.heads], dim=1)

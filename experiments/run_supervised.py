@@ -31,12 +31,35 @@ import torch.nn.functional as F
 import numpy as np
 
 from models.resnet import QuantizedResNet18, QuantizedConv2d
+from models.mlp import QuantizedMLP
+from models.mlp import QuantizedLinear as QuantizedLinearMLP
 from models.quantization import (
     DifferentiableQuantizer, get_quantizers, get_compression_stats,
     compute_average_bit_depth,
 )
 from training.metrics import evaluate_task, evaluate_all_tasks, CLMetrics
 from data.split_cifar100 import SplitCIFAR100
+from data.permuted_mnist import PermutedMNIST
+
+
+def _is_quantized_module(m) -> bool:
+    """A QuantizedConv2d or QuantizedLinear (the MLP one) — both expose .quantizer
+    when `do_quantize=True` and have a `.weight` we can scale gradients on."""
+    return isinstance(m, (QuantizedConv2d, QuantizedLinearMLP)) and getattr(m, 'do_quantize', False)
+
+
+def _module_weight(m):
+    """Underlying weight tensor (different attribute path for Conv vs Linear)."""
+    if isinstance(m, QuantizedConv2d):
+        return m.conv.weight
+    return m.linear.weight
+
+
+def _module_out_channels(m) -> int:
+    """Number of output channels (Conv) or output features (Linear)."""
+    if isinstance(m, QuantizedConv2d):
+        return m.out_channels
+    return m.linear.out_features
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -111,20 +134,20 @@ class ReplayBuffer:
 # Soft-protection (CSC)
 # ============================================================
 class SoftProtect:
-    """Scale conv weight gradients by 1 / (1 + beta * acc_b) per output channel.
+    """Scale weight gradients by 1 / (1 + beta * acc_b) per output channel.
+    Works for both QuantizedConv2d (4D weight) and QuantizedLinear (2D weight).
 
     `acc_b[layer]` is the running max of the layer's per-channel bit-depth across
-    completed tasks (so a channel that was important for any prior task resists
-    further change). Updated by `on_task_end()`.
+    completed tasks. Updated by `on_task_end()`.
     """
 
-    def __init__(self, model: QuantizedResNet18, beta: float = 1.0):
+    def __init__(self, model, beta: float = 1.0):
         self.beta = beta
         self.model = model
         self.acc_bits: dict[str, torch.Tensor] = {}
         for name, m in model.named_modules():
-            if isinstance(m, QuantizedConv2d) and m.do_quantize:
-                self.acc_bits[name] = torch.zeros(m.out_channels, device=DEVICE)
+            if _is_quantized_module(m):
+                self.acc_bits[name] = torch.zeros(_module_out_channels(m), device=DEVICE)
 
     @torch.no_grad()
     def on_task_end(self):
@@ -141,10 +164,14 @@ class SoftProtect:
             if name not in self.acc_bits:
                 continue
             acc = self.acc_bits[name]
-            scale = 1.0 / (1.0 + self.beta * acc)        # (out_channels,)
-            W = m.conv.weight                            # (O, I, kH, kW)
-            if W.grad is not None:
-                W.grad.mul_(scale.view(-1, 1, 1, 1))
+            scale = 1.0 / (1.0 + self.beta * acc)            # (out_channels,)
+            W = _module_weight(m)
+            if W.grad is None:
+                continue
+            if W.dim() == 4:
+                W.grad.mul_(scale.view(-1, 1, 1, 1))         # Conv2d (O,I,kH,kW)
+            else:
+                W.grad.mul_(scale.view(-1, 1))               # Linear (O, I)
 
 
 # ============================================================
@@ -396,9 +423,12 @@ def main():
     # PackNet
     p.add_argument('--prune', type=float, default=0.75)
     p.add_argument('--retrain_epochs', type=int, default=10)
-    # Model size
+    # Dataset / model
+    p.add_argument('--dataset', default='cifar100',
+                   choices=['cifar100', 'pmnist'],
+                   help='Split CIFAR-100 (multi-head ResNet) or Permuted MNIST (single-head MLP)')
     p.add_argument('--model', default='resnet18',
-                   choices=['resnet18'])
+                   choices=['resnet18', 'mlp'])
     p.add_argument('--data_root', default='/mnt/e/datasets/cifar100')
     p.add_argument('--tag', default='')
     args = p.parse_args()
@@ -409,19 +439,36 @@ def main():
         torch.backends.cudnn.benchmark = True
 
     device = DEVICE
-    classes_per_task = 100 // args.num_tasks
-    benchmark = SplitCIFAR100(data_root=args.data_root,
-                              num_tasks=args.num_tasks,
-                              batch_size=args.batch_size,
-                              seed=args.seed)
-    print(f'Method={args.method} num_tasks={args.num_tasks} '
-          f'epochs/task={args.epochs_per_task} model={args.model} seed={args.seed}',
-          flush=True)
-
     quantize = (args.method == 'csc')
-    model = QuantizedResNet18(num_classes_per_task=classes_per_task,
-                              num_tasks=args.num_tasks,
-                              quantize=quantize).to(device)
+
+    # Dataset + model factory
+    if args.dataset == 'cifar100':
+        classes_per_task = 100 // args.num_tasks
+        benchmark = SplitCIFAR100(data_root=args.data_root,
+                                  num_tasks=args.num_tasks,
+                                  batch_size=args.batch_size,
+                                  seed=args.seed)
+        model = QuantizedResNet18(num_classes_per_task=classes_per_task,
+                                  num_tasks=args.num_tasks,
+                                  quantize=quantize).to(device)
+    elif args.dataset == 'pmnist':
+        # Single-head MLP, all tasks share the 10-class output.
+        # MNIST default path; allow override via --data_root.
+        if args.data_root.endswith('cifar100'):                            # auto-default if not changed
+            args.data_root = '/mnt/e/datasets/mnist'
+        benchmark = PermutedMNIST(data_root=args.data_root,
+                                  num_tasks=args.num_tasks,
+                                  batch_size=args.batch_size,
+                                  seed=args.seed)
+        model = QuantizedMLP(input_size=784, hidden_size=256, num_classes=10,
+                             num_tasks=1,                                  # single head
+                             quantize=quantize).to(device)
+    else:
+        raise ValueError(f'Unknown dataset {args.dataset}')
+
+    print(f'Method={args.method} dataset={args.dataset} num_tasks={args.num_tasks} '
+          f'epochs/task={args.epochs_per_task} seed={args.seed}',
+          flush=True)
 
     use_replay = args.method in ('replay', 'der', 'csc') and args.replay_per_task > 0
     use_der = args.method == 'der' or (args.method == 'csc' and args.der_alpha > 0)
@@ -481,7 +528,7 @@ def main():
     elapsed = time.time() - t0
     print(f'  Wall time: {elapsed:.0f}s', flush=True)
 
-    out_path = f'checkpoints/sup_{args.method}_t{args.num_tasks}_s{args.seed}{args.tag}.json'
+    out_path = f'checkpoints/sup_{args.dataset}_{args.method}_t{args.num_tasks}_s{args.seed}{args.tag}.json'
     os.makedirs('checkpoints', exist_ok=True)
     out = {
         'config': vars(args),
