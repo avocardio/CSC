@@ -30,7 +30,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from models.resnet import QuantizedResNet18, QuantizedConv2d
+from models.resnet import QuantizedResNet18, QuantizedResNet50, QuantizedConv2d
 from models.mlp import QuantizedMLP
 from models.mlp import QuantizedLinear as QuantizedLinearMLP
 from models.quantization import (
@@ -428,7 +428,7 @@ def main():
                    choices=['cifar100', 'pmnist'],
                    help='Split CIFAR-100 (multi-head ResNet) or Permuted MNIST (single-head MLP)')
     p.add_argument('--model', default='resnet18',
-                   choices=['resnet18', 'mlp'])
+                   choices=['resnet18', 'resnet50', 'mlp'])
     p.add_argument('--data_root', default='/mnt/e/datasets/cifar100')
     p.add_argument('--tag', default='')
     args = p.parse_args()
@@ -448,9 +448,14 @@ def main():
                                   num_tasks=args.num_tasks,
                                   batch_size=args.batch_size,
                                   seed=args.seed)
-        model = QuantizedResNet18(num_classes_per_task=classes_per_task,
-                                  num_tasks=args.num_tasks,
-                                  quantize=quantize).to(device)
+        if args.model == 'resnet50':
+            model = QuantizedResNet50(num_classes_per_task=classes_per_task,
+                                      num_tasks=args.num_tasks,
+                                      quantize=quantize).to(device)
+        else:
+            model = QuantizedResNet18(num_classes_per_task=classes_per_task,
+                                      num_tasks=args.num_tasks,
+                                      quantize=quantize).to(device)
     elif args.dataset == 'pmnist':
         # Single-head MLP, all tasks share the 10-class output.
         # MNIST default path; allow override via --data_root.
@@ -528,7 +533,11 @@ def main():
     elapsed = time.time() - t0
     print(f'  Wall time: {elapsed:.0f}s', flush=True)
 
-    out_path = f'checkpoints/sup_{args.dataset}_{args.method}_t{args.num_tasks}_s{args.seed}{args.tag}.json'
+    # Model name in filename only when not the default — keeps existing
+    # CIFAR-100 ResNet-18 JSON paths backward-compatible.
+    model_part = '' if args.model == 'resnet18' else f'_{args.model}'
+    out_path = (f'checkpoints/sup_{args.dataset}_{args.method}'
+                f'{model_part}_t{args.num_tasks}_s{args.seed}{args.tag}.json')
     os.makedirs('checkpoints', exist_ok=True)
     out = {
         'config': vars(args),
