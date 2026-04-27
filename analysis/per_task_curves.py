@@ -92,26 +92,47 @@ def plot_per_task_decay(matrices: dict, num_tasks: int, out_pdf: str):
 
 
 def plot_matrix_heatmaps(matrices: dict, num_tasks: int, out_pdf: str):
-    """One heatmap per method showing the lower-triangular accuracy matrix."""
+    """Lower-triangular accuracy matrix heatmaps, one panel per method.
+    Cell annotations and per-method title with final-avg + BWT for
+    self-contained reading."""
     methods = [m for m in METHOD_STYLE if m in matrices]
     if not methods:
         return
-    fig, axes = plt.subplots(1, len(methods), figsize=(2.2 * len(methods), 2.4),
+    panel_w = 2.2 if num_tasks <= 10 else 1.4 + 0.18 * num_tasks
+    fig, axes = plt.subplots(1, len(methods),
+                             figsize=(panel_w * len(methods), 2.6),
                              squeeze=False)
     axes = axes[0]
+    # Restrict colormap to the relevant range so the upper-end contrast is visible
+    all_vals = np.concatenate([matrices[m].mean(axis=0)[
+        np.tril_indices(num_tasks)] for m in methods])
+    vmin = max(0.0, np.percentile(all_vals, 5) - 5)
     for ax, method in zip(axes, methods):
         mats = matrices[method].mean(axis=0)
-        # Mask upper triangle (above diagonal: model hasn't seen task j yet)
         mask = np.triu(np.ones_like(mats), k=1)
         masked = np.ma.masked_array(mats, mask=mask.astype(bool))
-        im = ax.imshow(masked, cmap='viridis', vmin=0, vmax=100, aspect='equal')
-        ax.set_title(METHOD_STYLE[method]['label'], fontsize=10)
+        im = ax.imshow(masked, cmap='viridis', vmin=vmin, vmax=100, aspect='equal')
+        # Per-method title: label + final-avg + BWT, computed from the matrix
+        T = num_tasks
+        final_avg = mats[T - 1, :].mean()
+        bwt = (mats[T - 1, :T - 1] - np.diag(mats)[:T - 1]).mean()
+        ax.set_title(f'{METHOD_STYLE[method]["label"]}\n'
+                     f'avg={final_avg:.1f}, BWT={bwt:+.1f}',
+                     fontsize=9)
         ax.set_xlabel('eval task $j$')
         ax.set_xticks(range(num_tasks))
         ax.set_yticks(range(num_tasks))
+        # Cell annotations only for small T (otherwise too cluttered)
+        if num_tasks <= 12:
+            for i in range(num_tasks):
+                for j in range(i + 1):
+                    val = mats[i, j]
+                    color = 'white' if val < (vmin + 100) / 2 else 'black'
+                    ax.text(j, i, f'{val:.0f}', ha='center', va='center',
+                            fontsize=6, color=color)
         if method == methods[0]:
             ax.set_ylabel('after training task $i$')
-    fig.colorbar(im, ax=axes.tolist(), shrink=0.8, label='Accuracy (%)')
+    fig.colorbar(im, ax=axes.tolist(), shrink=0.85, label='Test accuracy (%)')
     fig.savefig(out_pdf); fig.savefig(out_pdf.replace('.pdf', '.png'), dpi=180)
     plt.close(fig)
     print(f'Wrote: {out_pdf}')
@@ -128,8 +149,8 @@ def main():
     matrices = load_matrices(args.ckpt_dir, args.num_tasks, dataset=args.dataset)
     print(f'Methods with data: {list(matrices)}')
     suffix = '' if args.dataset == 'cifar100' else f'_{args.dataset}'
-    plot_per_task_decay(matrices, args.num_tasks,
-                        os.path.join(args.out_dir, f'per_task_decay{suffix}.pdf'))
+    # per_task_decay (8-subplot grid) intentionally not generated — the
+    # canonical CL plot is the running-average curve in cl_curves.py.
     plot_matrix_heatmaps(matrices, args.num_tasks,
                          os.path.join(args.out_dir, f'accuracy_matrix{suffix}.pdf'))
 
