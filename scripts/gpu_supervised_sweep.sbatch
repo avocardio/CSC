@@ -32,6 +32,12 @@ export PYTHONNOUSERSITE=1
 git pull --ff-only origin main 2>/dev/null || true
 mkdir -p checkpoints
 
+# Pre-download CIFAR-100 in a single process so the parallel launch below
+# does not race on partial file writes (which produced UnpicklingError /
+# 'Dataset not found or corrupted' crashes in earlier sweeps).
+echo \"Pre-downloading CIFAR-100 (idempotent if already cached)...\"
+python -c \"import torchvision; torchvision.datasets.CIFAR100(root='/capstor/scratch/cscs/mkalcher/datasets/cifar100', train=True, download=True); torchvision.datasets.CIFAR100(root='/capstor/scratch/cscs/mkalcher/datasets/cifar100', train=False, download=True)\"
+
 echo \"GPU supervised sweep at \$(date)\"
 echo \"Methods: $METHODS\"; echo \"Num tasks: $NUM_TASKS\"; echo \"Seeds: $SEEDS\"
 
