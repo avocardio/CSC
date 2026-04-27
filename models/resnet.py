@@ -66,18 +66,18 @@ class BasicBlock(nn.Module):
 
     def __init__(self, in_channels, out_channels, stride=1, downsample=None,
                  granularity=CompressionGranularity.CHANNEL, group_size=16,
-                 init_bit_depth=8.0):
+                 init_bit_depth=8.0, quantize=True):
         super().__init__()
         self.conv1 = QuantizedConv2d(in_channels, out_channels, 3,
                                      stride=stride, padding=1, bias=False,
                                      granularity=granularity, group_size=group_size,
-                                     init_bit_depth=init_bit_depth)
+                                     init_bit_depth=init_bit_depth, quantize=quantize)
         self.bn1 = nn.BatchNorm2d(out_channels)
 
         self.conv2 = QuantizedConv2d(out_channels, out_channels, 3,
                                      stride=1, padding=1, bias=False,
                                      granularity=granularity, group_size=group_size,
-                                     init_bit_depth=init_bit_depth)
+                                     init_bit_depth=init_bit_depth, quantize=quantize)
         self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.downsample = downsample
@@ -102,7 +102,8 @@ class QuantizedResNet18(nn.Module):
 
     def __init__(self, num_classes_per_task=10, num_tasks=10,
                  granularity=CompressionGranularity.CHANNEL, group_size=16,
-                 init_bit_depth=8.0, single_head=False, image_size=32):
+                 init_bit_depth=8.0, single_head=False, image_size=32,
+                 quantize=True):
         super().__init__()
         self.granularity = granularity
         self.group_size = group_size
@@ -112,6 +113,7 @@ class QuantizedResNet18(nn.Module):
         self.single_head = single_head
         self.in_channels = 64
         self.image_size = image_size
+        self.quantize_enabled = quantize
 
         # Initial conv (not compressed — first layer, keep full precision)
         if image_size <= 32:
@@ -153,11 +155,13 @@ class QuantizedResNet18(nn.Module):
 
         layers = []
         layers.append(BasicBlock(self.in_channels, out_channels, stride, downsample,
-                                 self.granularity, self.group_size, self.init_bit_depth))
+                                 self.granularity, self.group_size, self.init_bit_depth,
+                                 quantize=self.quantize_enabled))
         self.in_channels = out_channels
         for _ in range(1, num_blocks):
             layers.append(BasicBlock(out_channels, out_channels, 1, None,
-                                     self.granularity, self.group_size, self.init_bit_depth))
+                                     self.granularity, self.group_size, self.init_bit_depth,
+                                     quantize=self.quantize_enabled))
 
         return nn.Sequential(*layers)
 

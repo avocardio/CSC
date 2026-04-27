@@ -1,107 +1,90 @@
-"""Continual learning evaluation metrics."""
-
+"""Continual-learning metrics: per-task evaluation and the standard
+accuracy/BWT/forgetting bookkeeping.
+"""
+from __future__ import annotations
 import torch
-import numpy as np
 
 
 @torch.no_grad()
-def evaluate_task(model, test_loader, task_id, device='cuda'):
-    """Evaluate model accuracy on a single task."""
+def evaluate_task(model, loader, task_id: int, device: str = 'cuda') -> float:
     model.eval()
-    correct = 0
-    total = 0
-    for batch in test_loader:
-        x, y = batch[0].to(device), batch[1].to(device)
+    correct, total = 0, 0
+    for batch in loader:
+        x, y = batch[0].to(device, non_blocking=True), batch[1].to(device, non_blocking=True)
         logits = model(x, task_id=task_id)
-        preds = logits.argmax(dim=1)
-        correct += (preds == y).sum().item()
-        total += y.size(0)
-    model.train()
-    return correct / total if total > 0 else 0.0
+        pred = logits.argmax(dim=-1)
+        correct += (pred == y).sum().item()
+        total += y.numel()
+    return correct / max(total, 1)
 
 
-def evaluate_all_tasks(model, benchmark, num_tasks_seen, device='cuda'):
-    """Evaluate on all tasks seen so far. Returns accuracy list."""
+@torch.no_grad()
+def evaluate_all_tasks(model, benchmark, n_seen_tasks: int, device: str = 'cuda') -> list[float]:
     accs = []
-    for t in range(num_tasks_seen):
-        test_loader = benchmark.get_task_test_loader(t)
-        acc = evaluate_task(model, test_loader, t, device)
-        accs.append(acc)
+    for t in range(n_seen_tasks):
+        _, test_loader = benchmark.get_task_dataloaders(t)
+        accs.append(evaluate_task(model, test_loader, t, device))
     return accs
 
 
 class CLMetrics:
-    """Track continual learning metrics across tasks.
+    """Holds the accuracy_matrix A[i][j] = accuracy on task j after training on task i.
 
-    Maintains the accuracy matrix A[i][j] = accuracy on task j after training on task i.
+    Average accuracy = mean over j of A[T-1][j].
+    Backward transfer  = mean over j of (A[T-1][j] - A[j][j]) for j < T-1.
     """
 
-    def __init__(self, num_tasks):
+    def __init__(self, num_tasks: int):
         self.num_tasks = num_tasks
-        self.accuracy_matrix = np.zeros((num_tasks, num_tasks))
-        self.bits_history = []  # total bits after each task
+        self.accuracy_matrix = [[0.0] * num_tasks for _ in range(num_tasks)]
 
-    def update(self, current_task, accuracies, total_bits=None):
-        """Record accuracies after training on current_task."""
-        for j, acc in enumerate(accuracies):
-            self.accuracy_matrix[current_task][j] = acc
-        if total_bits is not None:
-            self.bits_history.append(total_bits)
+    def update(self, task_idx: int, accs: list[float]):
+        for j, a in enumerate(accs):
+            self.accuracy_matrix[task_idx][j] = float(a)
 
-    def average_accuracy(self, after_task=None):
-        """Average accuracy after training on task T (default: last task)."""
-        if after_task is None:
-            after_task = self.num_tasks - 1
-        return np.mean(self.accuracy_matrix[after_task, :after_task + 1])
+    def average_accuracy(self, task_idx: int) -> float:
+        row = self.accuracy_matrix[task_idx][: task_idx + 1]
+        return sum(row) / max(len(row), 1)
 
-    def backward_transfer(self, after_task=None):
-        """Backward transfer: avg degradation of old tasks."""
-        if after_task is None:
-            after_task = self.num_tasks - 1
-        if after_task == 0:
+    def final_average(self) -> float:
+        return self.average_accuracy(self.num_tasks - 1)
+
+    def backward_transfer(self) -> float:
+        T = self.num_tasks
+        if T < 2:
             return 0.0
-        bwt = 0.0
-        for j in range(after_task):
-            bwt += self.accuracy_matrix[after_task][j] - self.accuracy_matrix[j][j]
-        return bwt / after_task
+        diffs = [self.accuracy_matrix[T - 1][j] - self.accuracy_matrix[j][j]
+                 for j in range(T - 1)]
+        return sum(diffs) / max(len(diffs), 1)
 
-    def forward_transfer(self, after_task=None):
-        """Forward transfer: performance on new task before training."""
-        if after_task is None:
-            after_task = self.num_tasks - 1
-        if after_task == 0:
+    def forgetting(self) -> float:
+        # Max forgetting = max over j (max_i<T A[i][j] - A[T-1][j])
+        T = self.num_tasks
+        if T < 2:
             return 0.0
-        fwt = 0.0
-        count = 0
-        for j in range(1, after_task + 1):
-            if j - 1 >= 0:
-                fwt += self.accuracy_matrix[j - 1][j]  # acc on task j before training on j
-                count += 1
-        return fwt / count if count > 0 else 0.0
+        forgets = []
+        for j in range(T - 1):
+            max_prev = max(self.accuracy_matrix[i][j] for i in range(j, T - 1))
+            forgets.append(max_prev - self.accuracy_matrix[T - 1][j])
+        return sum(forgets) / max(len(forgets), 1)
 
-    def summary(self, after_task=None):
-        if after_task is None:
-            after_task = self.num_tasks - 1
+    def summary(self) -> dict:
         return {
-            'avg_accuracy': self.average_accuracy(after_task),
-            'backward_transfer': self.backward_transfer(after_task),
-            'forward_transfer': self.forward_transfer(after_task),
-            'bits_history': self.bits_history,
+            'final_avg': self.final_average(),
+            'backward_transfer': self.backward_transfer(),
+            'forgetting': self.forgetting(),
+            'matrix': self.accuracy_matrix,
         }
 
-    def print_matrix(self, after_task=None):
-        if after_task is None:
-            after_task = self.num_tasks - 1
-        print("\nAccuracy Matrix (A[i][j] = acc on task j after training on task i):")
-        header = "     " + "".join([f"T{j:<6d}" for j in range(after_task + 1)])
+    def print_matrix(self):
+        print('\nAccuracy matrix (rows = task trained on, cols = eval task):')
+        T = self.num_tasks
+        header = '       ' + ' '.join(f'T{j:>2d} ' for j in range(T))
         print(header)
-        for i in range(after_task + 1):
-            row = f"T{i:<3d} "
-            for j in range(after_task + 1):
-                if j <= i:
-                    row += f"{self.accuracy_matrix[i][j]*100:5.1f} "
-                else:
-                    row += "  -   "
-            print(row)
-        print(f"\nAvg Accuracy: {self.average_accuracy(after_task)*100:.2f}%")
-        print(f"Backward Transfer: {self.backward_transfer(after_task)*100:.2f}%")
+        for i in range(T):
+            row = self.accuracy_matrix[i]
+            row_str = ' '.join(f'{a*100:5.1f}' for a in row[: i + 1])
+            print(f'  T{i:>2d}: {row_str}')
+        print(f'\n  final_avg = {self.final_average()*100:.2f}%')
+        print(f'  BWT       = {self.backward_transfer()*100:+.2f}%')
+        print(f'  forgetting= {self.forgetting()*100:.2f}%')

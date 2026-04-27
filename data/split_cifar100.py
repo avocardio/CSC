@@ -79,15 +79,15 @@ class SplitCIFAR100:
 
         # Load full datasets
         self.train_dataset = torchvision.datasets.CIFAR100(
-            root=data_root, train=True, download=False,
+            root=data_root, train=True, download=True,
             transform=get_cifar100_transforms(train=True))
         self.test_dataset = torchvision.datasets.CIFAR100(
-            root=data_root, train=False, download=False,
+            root=data_root, train=False, download=True,
             transform=get_cifar100_transforms(train=False))
 
         # Also load raw (no augmentation) for replay buffer storage
         self.train_dataset_raw = torchvision.datasets.CIFAR100(
-            root=data_root, train=True, download=False,
+            root=data_root, train=True, download=True,
             transform=get_cifar100_transforms(train=False))
 
         # Get targets as numpy array for fast indexing
@@ -167,10 +167,10 @@ class SplitCIFAR10:
         self.num_workers = num_workers
 
         self.train_dataset = torchvision.datasets.CIFAR10(
-            root=data_root, train=True, download=False,
+            root=data_root, train=True, download=True,
             transform=get_cifar10_transforms(train=True))
         self.test_dataset = torchvision.datasets.CIFAR10(
-            root=data_root, train=False, download=False,
+            root=data_root, train=False, download=True,
             transform=get_cifar10_transforms(train=False))
 
     def get_dataloaders(self):
