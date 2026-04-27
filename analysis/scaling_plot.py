@@ -27,19 +27,17 @@ plt.rcParams.update({
 
 # Approximate parameter counts (M) for the scaling axis.
 PARAMS_M = {
-    'mlp':       0.27,
-    'vit_tiny':  5.4,
-    'resnet18':  11.2,
-    'resnet50':  23.7,
-    'vit_small': 21.4,
+    'resnet18':      11.2,
+    'resnet50':      23.7,
+    'convnext_tiny': 28.0,
+    'resnet101':     42.7,
 }
 # Display labels for the x-axis (instead of just numeric)
 MODEL_LABELS = {
-    'mlp':       'MLP\n0.3M',
-    'vit_tiny':  'ViT-Tiny\n5.4M',
-    'resnet18':  'ResNet-18\n11M',
-    'vit_small': 'ViT-Small\n21M',
-    'resnet50':  'ResNet-50\n24M',
+    'resnet18':      'ResNet-18\n11M',
+    'resnet50':      'ResNet-50\n24M',
+    'convnext_tiny': 'ConvNeXt-T\n28M',
+    'resnet101':     'ResNet-101\n43M',
 }
 
 METHOD_STYLE = {

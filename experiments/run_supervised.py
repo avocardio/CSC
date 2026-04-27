@@ -30,10 +30,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from models.resnet import QuantizedResNet18, QuantizedResNet50, QuantizedConv2d
+from models.resnet import (QuantizedResNet18, QuantizedResNet50,
+                            QuantizedResNet101, QuantizedConv2d)
+from models.convnext import convnext_tiny
 from models.mlp import QuantizedMLP
 from models.mlp import QuantizedLinear as QuantizedLinearMLP
-from models.vit import vit_tiny, vit_small
 from models.quantization import (
     DifferentiableQuantizer, get_quantizers, get_compression_stats,
     compute_average_bit_depth,
@@ -429,7 +430,8 @@ def main():
                    choices=['cifar100', 'pmnist'],
                    help='Split CIFAR-100 (multi-head ResNet) or Permuted MNIST (single-head MLP)')
     p.add_argument('--model', default='resnet18',
-                   choices=['resnet18', 'resnet50', 'mlp', 'vit_tiny', 'vit_small'])
+                   choices=['resnet18', 'resnet50', 'resnet101',
+                            'convnext_tiny', 'mlp'])
     p.add_argument('--data_root', default='/mnt/e/datasets/cifar100')
     p.add_argument('--tag', default='')
     args = p.parse_args()
@@ -453,14 +455,14 @@ def main():
             model = QuantizedResNet50(num_classes_per_task=classes_per_task,
                                       num_tasks=args.num_tasks,
                                       quantize=quantize).to(device)
-        elif args.model == 'vit_tiny':
-            model = vit_tiny(num_classes_per_task=classes_per_task,
-                             num_tasks=args.num_tasks,
-                             quantize=quantize).to(device)
-        elif args.model == 'vit_small':
-            model = vit_small(num_classes_per_task=classes_per_task,
-                              num_tasks=args.num_tasks,
-                              quantize=quantize).to(device)
+        elif args.model == 'resnet101':
+            model = QuantizedResNet101(num_classes_per_task=classes_per_task,
+                                       num_tasks=args.num_tasks,
+                                       quantize=quantize).to(device)
+        elif args.model == 'convnext_tiny':
+            model = convnext_tiny(num_classes_per_task=classes_per_task,
+                                  num_tasks=args.num_tasks,
+                                  quantize=quantize).to(device)
         else:
             model = QuantizedResNet18(num_classes_per_task=classes_per_task,
                                       num_tasks=args.num_tasks,

@@ -19,11 +19,13 @@ class QuantizedConv2d(nn.Module):
     """Conv2d with differentiable quantization on weights."""
 
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
-                 padding=0, bias=False, granularity=CompressionGranularity.CHANNEL,
+                 padding=0, bias=False, groups=1,
+                 granularity=CompressionGranularity.CHANNEL,
                  group_size=16, init_bit_depth=8.0, quantize=True):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size,
-                              stride=stride, padding=padding, bias=bias)
+                              stride=stride, padding=padding, bias=bias,
+                              groups=groups)
         self.do_quantize = quantize
         if quantize:
             self.quantizer = DifferentiableQuantizer(
@@ -37,7 +39,8 @@ class QuantizedConv2d(nn.Module):
         if self.do_quantize:
             q_weight = self.quantizer(self.conv.weight)
             return F.conv2d(x, q_weight, self.conv.bias,
-                           self.conv.stride, self.conv.padding)
+                           self.conv.stride, self.conv.padding,
+                           self.conv.dilation, self.conv.groups)
         return self.conv(x)
 
     @property
@@ -340,3 +343,44 @@ class QuantizedResNet50(nn.Module):
         if task_id is not None:
             return self.heads[task_id](h)
         return torch.cat([head(h) for head in self.heads], dim=1)
+
+
+class QuantizedResNet101(QuantizedResNet50):
+    """ResNet-101 — same Bottleneck blocks as R50, depths [3, 4, 23, 3] (~42.5M)."""
+
+    def __init__(self, num_classes_per_task=10, num_tasks=10,
+                 granularity=CompressionGranularity.CHANNEL, group_size=16,
+                 init_bit_depth=8.0, single_head=False, image_size=32,
+                 quantize=True):
+        nn.Module.__init__(self)
+        self.granularity = granularity
+        self.group_size = group_size
+        self.init_bit_depth = init_bit_depth
+        self.num_tasks = num_tasks
+        self.num_classes_per_task = num_classes_per_task
+        self.single_head = single_head
+        self.in_channels = 64
+        self.image_size = image_size
+        self.quantize_enabled = quantize
+
+        if image_size <= 32:
+            self.conv1 = nn.Conv2d(3, 64, 3, 1, 1, bias=False)
+            self.maxpool = nn.Identity()
+        else:
+            self.conv1 = nn.Conv2d(3, 64, 7, 2, 3, bias=False)
+            self.maxpool = nn.MaxPool2d(3, 2, 1)
+        self.bn1 = nn.BatchNorm2d(64)
+
+        self.layer1 = self._make_layer(64,  3,  stride=1)
+        self.layer2 = self._make_layer(128, 4,  stride=2)
+        self.layer3 = self._make_layer(256, 23, stride=2)
+        self.layer4 = self._make_layer(512, 3,  stride=2)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+        feat_dim = 512 * Bottleneck.expansion
+        if single_head:
+            self.classifier = nn.Linear(feat_dim, num_classes_per_task * num_tasks)
+        else:
+            self.heads = nn.ModuleList(
+                [nn.Linear(feat_dim, num_classes_per_task) for _ in range(num_tasks)])
+        self._init_weights()
