@@ -500,6 +500,46 @@ def test_action_in_valid_range():
     assert (a >= -1).all() and (a <= 1).all()
 
 
+def test_exponent_drift_cannot_produce_nan():
+    """Regression: when exponent drifts to extreme values, quantize() must
+    not produce NaN/inf. (The original bug: inv_scale=2**(-e) overflowed for
+    e<-126, poisoning the actor with NaN at seed-dependent steps.)
+    """
+    torch.manual_seed(0)
+    layer = QuantizedLinear(8, 4, init_bit=4.0, init_exp=-4.0)
+    x = torch.randn(16, 8)
+    # Force exponent to extreme values
+    for e_val in (-200.0, -50.0, -20.0, 0.0, 20.0, 50.0, 200.0):
+        with torch.no_grad():
+            layer.quantizer.exponent.data.fill_(e_val)
+        y = layer(x)
+        assert torch.isfinite(y).all(), (
+            f'forward produced non-finite output at e={e_val}: '
+            f'has_nan={torch.isnan(y).any()} has_inf={torch.isinf(y).any()}')
+
+
+def test_csc_agent_exponent_clamped_post_step():
+    """Agent must clamp exponent within [-20, 20] after every imp_opt step."""
+    torch.manual_seed(0)
+    agent = SACAgent(method='csc', n_tasks=1, batch_size=8, device='cpu',
+                     lr_quant=10.0,                                    # huge to force drift
+                     replay_per_task=32)
+    buf = ReplayBuffer(capacity=128, device='cpu')
+    for _ in range(64):
+        buf.add(np.random.randn(OBS_DIM).astype(np.float32),
+                np.random.randn(ACT_DIM).astype(np.float32),
+                np.random.randn(),
+                np.random.randn(OBS_DIM).astype(np.float32), 0.0, 0)
+    agent.reset_for_new_task(0)
+    for _ in range(20):
+        agent.update(buf)
+    for layer in agent.actor.core_layers():
+        e = layer.quantizer.exponent.data
+        assert (e >= -20.0).all() and (e <= 20.0).all(), (
+            f'exponent out of bounds: range=[{e.min().item()}, {e.max().item()}]')
+        assert torch.isfinite(e).all()
+
+
 def test_per_task_alpha_gradient_routing():
     """Only the log_alpha entries used in this batch should accumulate gradient."""
     torch.manual_seed(0)

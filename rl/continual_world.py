@@ -476,6 +476,11 @@ class SACAgent:
                 with torch.no_grad():
                     for layer in self.actor.core_layers():
                         layer.quantizer.bit_depth.data.clamp_(min=self.bit_floor)
+                        # Bound exponent so 2**(-e) cannot overflow to inf and
+                        # poison the actor with NaN. Without this, e can drift
+                        # past -126 over many updates with lr_quant=0.5 and
+                        # produce unreproducible seed-dependent NaN crashes.
+                        layer.quantizer.exponent.data.clamp_(min=-20.0, max=20.0)
 
         # ---- alpha update (per-task: only the entries actually present
         # in this batch get a gradient, naturally) ----

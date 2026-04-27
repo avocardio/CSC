@@ -46,8 +46,13 @@ def quantize(x, b, e):
         Quantized weights. When b=0, output is zero.
     """
     b_clamped = b.clamp(min=0.0)
-    scale = (2.0 ** e).clamp(min=1e-10)
-    inv_scale = (2.0 ** (-e))
+    # Clamp exponent to prevent 2**(-e) overflow when e drifts very negative
+    # (which produces inf -> NaN through subsequent multiplications). The bound
+    # ±20 covers any realistic dynamic range (2^20 ≈ 1e6) without saturating
+    # inv_scale, while staying well below float32 overflow at 2^126.
+    e_safe = e.clamp(min=-20.0, max=20.0)
+    scale = (2.0 ** e_safe).clamp(min=1e-10)
+    inv_scale = (2.0 ** (-e_safe))
 
     # Compute range bounds: [-2^(b-1), 2^(b-1) - 1]
     # For b=0: range is [-0.5, -0.5] which clamps everything to -0.5,
@@ -60,7 +65,10 @@ def quantize(x, b, e):
     scaled = inv_scale * x
     clamped = torch.min(torch.max(scaled, lower), upper)
     rounded = ste_round(clamped)
-    return scale * rounded
+    out = scale * rounded
+    # Belt-and-braces: replace any non-finite slipping through (should be impossible
+    # after the e_safe clamp above, but cheaply guards against future regressions)
+    return torch.where(torch.isfinite(out), out, torch.zeros_like(out))
 
 
 class DifferentiableQuantizer(nn.Module):
