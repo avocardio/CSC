@@ -34,14 +34,22 @@ METHOD_STYLE = {
 }
 
 
-def load_matrices(ckpt_dir: str, num_tasks: int, dataset: str = 'cifar100') -> dict:
-    """Group A[i][j] matrices by method (filtered to one dataset), seed-averaged."""
+def load_matrices(ckpt_dir: str, num_tasks: int, dataset: str = 'cifar100',
+                  model: str | None = None) -> dict:
+    """Filter by (dataset, num_tasks, model). Default model = resnet18 for
+    cifar100, mlp for pmnist. Skip tag'd ablation runs."""
+    if model is None:
+        model = 'mlp' if dataset == 'pmnist' else 'resnet18'
     by_method: dict[str, list] = defaultdict(list)
     for f in sorted(glob.glob(os.path.join(ckpt_dir, 'sup_*.json'))):
         d = json.load(open(f))
         cfg = d['config']
         ds = cfg.get('dataset', 'cifar100')
         if ds != dataset or cfg.get('num_tasks') != num_tasks:
+            continue
+        if cfg.get('model', 'resnet18') != model:
+            continue
+        if cfg.get('tag', ''):
             continue
         method = cfg.get('method')
         mat = np.array(d['accuracy_matrix']) * 100

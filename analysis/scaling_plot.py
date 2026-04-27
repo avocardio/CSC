@@ -55,7 +55,10 @@ def load(ckpt_dir: str, dataset: str, num_tasks: int) -> dict:
         cfg = d['config']
         if cfg.get('dataset', 'cifar100') != dataset: continue
         if cfg.get('num_tasks') != num_tasks: continue
+        if cfg.get('tag', ''): continue
         model = cfg.get('model', 'resnet18')
+        if model not in PARAMS_M:                         # skip unknown architectures
+            continue
         method = cfg.get('method')
         by[(model, method)].append({
             'acc': d['final_avg'] * 100,
