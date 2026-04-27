@@ -938,7 +938,7 @@ def train(method: str, tasks: list[str], steps_per_task: int, seed: int,
                 parts = ' '.join(f'{tasks[ti][:6]}={evals[tasks[ti]]:.2f}'
                                  for ti in range(task_idx + 1))
                 rep = f' rep={agent.replay_store.n_tasks}t' if agent.replay_store else ''
-                a_eff = agent.alpha[task_idx].item()
+                a_eff = agent.alpha[0 if agent.shared_alpha else task_idx].item()
                 print(f'  {(step+1)//1000}K ({sps:.0f} sps) {parts}'
                       f'{rep} alpha={a_eff:.3f} ret={ret_avg:.1f}',
                       flush=True)
