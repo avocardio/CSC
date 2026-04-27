@@ -37,8 +37,11 @@ METHOD_STYLE = {
 }
 
 
-def load_results(ckpt_dir: str, dataset: str = 'cifar100') -> dict:
-    """Group JSON results by (method, num_tasks), filtered to a single dataset."""
+def load_results(ckpt_dir: str, dataset: str = 'cifar100',
+                 model: str = 'resnet18') -> dict:
+    """Group JSON results by (method, num_tasks), filtered to a single
+    (dataset, model). Default model is resnet18 to keep the canonical table
+    architecture-pure when scaling JSONs (R50/R101/ConvNeXt) are also on disk."""
     groups = defaultdict(list)
     for f in sorted(glob.glob(os.path.join(ckpt_dir, 'sup_*.json'))):
         try:
@@ -50,6 +53,11 @@ def load_results(ckpt_dir: str, dataset: str = 'cifar100') -> dict:
         # Backward-compat: old JSONs without 'dataset' key are CIFAR-100
         ds = cfg.get('dataset', 'cifar100')
         if ds != dataset:
+            continue
+        if cfg.get('model', 'resnet18') != model:
+            continue
+        # Skip ablation runs (e.g., csc_alone with tag='_alone') from main table
+        if cfg.get('tag', ''):
             continue
         key = (cfg.get('method', 'unknown'), cfg.get('num_tasks', 0))
         groups[key].append(d)
