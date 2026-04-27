@@ -27,6 +27,11 @@ set -uo pipefail
 module load python/3.12.5
 source \"\$HOME/venvs/pt29/bin/activate\"
 export PYTHONNOUSERSITE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+# Force CPU even on GH200 nodes: GPUs are visible from the node even when
+# --gres=gpu:0, and torch.cuda.is_available() returning True silently routes
+# us onto shared GPUs at terrible throughput (and triggers a CUDA-only NaN
+# in our quantize() that we have not yet diagnosed).
+export CUDA_VISIBLE_DEVICES=\"\"
 
 git pull --ff-only origin main 2>/dev/null || true
 mkdir -p checkpoints
