@@ -540,6 +540,52 @@ def test_csc_agent_exponent_clamped_post_step():
         assert torch.isfinite(e).all()
 
 
+def test_alpha_update_ignores_replay_samples():
+    """Regression for the alpha-explosion bug: when training task 1 with
+    replay samples from task 0, only the current-task slice of the batch
+    must update alpha (not the replay slice). Otherwise log_alpha[0] keeps
+    accumulating gradient from the converged head's near-deterministic
+    behaviour and explodes to e^14.
+    """
+    torch.manual_seed(0)
+    agent = SACAgent(method='replay', n_tasks=2, batch_size=16, device='cpu',
+                     replay_per_task=64, replay_ratio=0.5)
+    buf = ReplayBuffer(capacity=256, device='cpu')
+    # All current-task data is task 1
+    for _ in range(80):
+        buf.add(np.random.randn(OBS_DIM).astype(np.float32),
+                np.random.randn(ACT_DIM).astype(np.float32),
+                np.random.randn(),
+                np.random.randn(OBS_DIM).astype(np.float32), 0.0, 1)
+    # Pretend task 0 finished and stored a replay snapshot
+    fake_buf = ReplayBuffer(capacity=128, device='cpu')
+    for _ in range(64):
+        fake_buf.add(np.random.randn(OBS_DIM).astype(np.float32),
+                     np.random.randn(ACT_DIM).astype(np.float32),
+                     np.random.randn(),
+                     np.random.randn(OBS_DIM).astype(np.float32), 0.0, 0)
+    agent.replay_store.add_task(fake_buf, 32)
+    agent.reset_for_new_task(1)
+
+    # Manually nudge actor's head 0 toward near-deterministic policy so the bug
+    # would fire: clamp log_std head 0 toward the lower bound
+    with torch.no_grad():
+        agent.actor.heads_ls_b[0].fill_(-15.0)                # log_std ≈ -15
+
+    a_before = agent.log_alpha.data.clone()
+    for _ in range(5):
+        agent.update(buf)
+    a_after = agent.log_alpha.data
+    # Old-task alpha must not have moved (only current-task slice updates it)
+    assert (a_after[0] - a_before[0]).abs() < 1e-6, (
+        f'log_alpha[0] moved by {(a_after[0] - a_before[0]).item()} despite '
+        f'replay sampling from task 0 with near-deterministic head 0 — the '
+        f'mixed-batch alpha-explosion bug is back.')
+    # Current-task alpha may have moved
+    # (we just check it didn't blow up)
+    assert (a_after[1] - a_before[1]).abs() < 5.0
+
+
 def test_per_task_alpha_gradient_routing():
     """Only the log_alpha entries used in this batch should accumulate gradient."""
     torch.manual_seed(0)

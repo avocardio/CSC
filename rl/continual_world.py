@@ -482,13 +482,24 @@ class SACAgent:
                         # produce unreproducible seed-dependent NaN crashes.
                         layer.quantizer.exponent.data.clamp_(min=-20.0, max=20.0)
 
-        # ---- alpha update (per-task: only the entries actually present
-        # in this batch get a gradient, naturally) ----
-        alpha_loss = -(self.log_alpha[t].exp() *
-                       (lp2.squeeze(-1) + self.target_entropy).detach()).mean()
-        self.alpha_opt.zero_grad(set_to_none=True)
-        alpha_loss.backward()
-        self.alpha_opt.step()
+        # ---- alpha update (CURRENT-task slice only) ----
+        # Note: with multi-head + per-task log_alpha, computing the alpha update
+        # over the mixed (current + replay) batch lets old-task alphas keep
+        # receiving gradient. For an old task whose head has converged near the
+        # log_std clamp (so the policy is near-deterministic), lp(sample) becomes
+        # large positive and the gradient pushes log_alpha[old] up unboundedly,
+        # producing alpha=1e6 nonsense. The fix: only train alpha on the
+        # current-task slice of the batch. This matches the spirit of CW's
+        # reservoir replay where the data is dominated by the current task.
+        cur_mask = (t == self._current_task)
+        if cur_mask.any():
+            cur_lp = lp2.squeeze(-1)[cur_mask]
+            cur_alpha = self.log_alpha[self._current_task].exp()
+            alpha_loss = -(cur_alpha *
+                           (cur_lp + self.target_entropy).detach()).mean()
+            self.alpha_opt.zero_grad(set_to_none=True)
+            alpha_loss.backward()
+            self.alpha_opt.step()
 
         # ---- target update ----
         with torch.no_grad():
