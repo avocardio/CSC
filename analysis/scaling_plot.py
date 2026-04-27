@@ -98,17 +98,36 @@ def plot(out_pdf: str, by: dict, num_tasks: int):
                             fontweight='bold')
 
     ax.set_xscale('log')
-    ax.set_xlabel('Model parameters')
+    ax.set_xlabel('')                                            # labels carry the meaning
     ax.set_ylabel('Final avg accuracy (%)')
-    # Custom x-tick labels (clear minor ticks first to avoid overlap with log defaults)
-    tick_models = [m for m in models]
-    tick_x = [PARAMS_M[m] for m in tick_models]
-    tick_l = [MODEL_LABELS.get(m, f'{m}\n{PARAMS_M[m]:.1f}M') for m in tick_models]
-    ax.set_xticks(tick_x, minor=False)
-    ax.set_xticks([], minor=True)
-    ax.set_xticklabels(tick_l, minor=False)
+    # Hide default log tick labels and place our own as text (staggered when
+    # adjacent labels would overlap on a log scale).
     from matplotlib.ticker import NullFormatter
+    ax.set_xticks([])
     ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.xaxis.set_major_formatter(NullFormatter())
+    # Pad x-range so labels at the edges have room
+    xs_all = sorted(PARAMS_M[m] for m in models)
+    if xs_all:
+        ax.set_xlim(xs_all[0] / 1.4, xs_all[-1] * 1.4)
+    ymin, _ = ax.get_ylim()
+    # Place labels below the x-axis. Stagger when consecutive labels
+    # are within < 1.3x of each other on log scale.
+    sorted_models = sorted(models, key=lambda m: PARAMS_M.get(m, 0))
+    last_x = 0
+    stagger = False
+    for m in sorted_models:
+        x = PARAMS_M[m]
+        label = MODEL_LABELS.get(m, f'{m}\n{x:.1f}M')
+        if last_x > 0 and (x / last_x) < 1.3:
+            stagger = not stagger
+        else:
+            stagger = False
+        last_x = x
+        y_text = -0.05 if not stagger else -0.14
+        ax.text(x, y_text, label, transform=ax.get_xaxis_transform(),
+                ha='center', va='top', fontsize=10)
+        ax.axvline(x, color='#cccccc', lw=0.5, zorder=0)
     ax.set_title(f'Model-size scaling on {num_tasks}-task Split CIFAR-100')
     ax.grid(alpha=0.25, which='major')
     ax.legend(loc='lower right', frameon=True)
