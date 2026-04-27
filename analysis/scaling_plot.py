@@ -1,139 +1,137 @@
-"""Generate the two-panel scaling figure for the paper.
+"""Model-size scaling plot: CSC's capacity-efficiency advantage as a function
+of model parameters.
 
-Left panel: Permuted MNIST scaling (10, 20, 50 tasks)
-Right panel: Split CIFAR-100 scaling (10, 20, 25, 50 tasks)
+For each (model architecture, num_params) point, plots final average accuracy
+on Split CIFAR-100 (10 tasks). Solid line = CSC, dashed = DER++, dotted = ER,
+gray = Finetune. Capacity used (% bits) is annotated next to CSC points.
+
+Auto-detects available models from JSONs.
+
+Usage: python analysis/scaling_plot.py --ckpt_dir /tmp/cluster_jsons
 """
-
-import sys
-import os
+from __future__ import annotations
+import os, sys, json, glob, argparse
+from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import numpy as np
-
 plt.rcParams.update({
-    'font.size': 12, 'axes.labelsize': 14, 'xtick.labelsize': 11,
-    'ytick.labelsize': 11, 'legend.fontsize': 11, 'figure.dpi': 150,
+    'font.family': 'serif', 'font.size': 11,
+    'axes.labelsize': 12, 'axes.titlesize': 12,
+    'legend.fontsize': 9, 'figure.dpi': 150,
+    'axes.spines.top': False, 'axes.spines.right': False,
 })
 
-# Data from experiments
-pmnist = {
-    'tasks': [10, 20, 50],
-    'soft_csc': [90.45, 83.89, 74.91],
-    'replay': [88.91, 83.06, 76.80],
-    'packnet': [95.18, 66.87, 24.28],
+# Approximate parameter counts (M) for the scaling axis.
+PARAMS_M = {
+    'mlp':       0.27,
+    'vit_tiny':  5.4,
+    'resnet18':  11.2,
+    'resnet50':  23.7,
+    'vit_small': 21.4,
+}
+# Display labels for the x-axis (instead of just numeric)
+MODEL_LABELS = {
+    'mlp':       'MLP\n0.3M',
+    'vit_tiny':  'ViT-Tiny\n5.4M',
+    'resnet18':  'ResNet-18\n11M',
+    'vit_small': 'ViT-Small\n21M',
+    'resnet50':  'ResNet-50\n24M',
 }
 
-cifar = {
-    'tasks': [10, 20, 25, 50],
-    'soft_csc': [76.12, 81.42, 84.24, 90.35],
-    'replay': [71.42, 77.51, 83.55, 88.58],
-    'packnet': [87.18, 86.90, 87.87, 87.41],
+METHOD_STYLE = {
+    'finetune': {'label': 'Finetune', 'color': '#888888', 'marker': 'x', 'ls': ':'},
+    'replay':   {'label': 'ER',       'color': '#4CAF50', 'marker': 's', 'ls': '--'},
+    'der':      {'label': 'DER++',    'color': '#9C27B0', 'marker': 'D', 'ls': '--'},
+    'csc':      {'label': 'CSC (ours)', 'color': '#1565C0', 'marker': 'o', 'ls': '-'},
 }
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
 
-# Left: Permuted MNIST
-for method, marker, color in [
-    ('soft_csc', 'o', '#2196F3'), ('replay', 's', '#4CAF50'), ('packnet', '^', '#FF5722')]:
-    label = {'soft_csc': 'Soft CSC', 'replay': 'Replay-only', 'packnet': 'PackNet'}[method]
-    ax1.plot(pmnist['tasks'], pmnist[method], f'{marker}-', color=color,
-             label=label, markersize=8, linewidth=2)
+def load(ckpt_dir: str, dataset: str, num_tasks: int) -> dict:
+    by = defaultdict(list)
+    for f in sorted(glob.glob(os.path.join(ckpt_dir, 'sup_*.json'))):
+        d = json.load(open(f))
+        cfg = d['config']
+        if cfg.get('dataset', 'cifar100') != dataset: continue
+        if cfg.get('num_tasks') != num_tasks: continue
+        model = cfg.get('model', 'resnet18')
+        method = cfg.get('method')
+        by[(model, method)].append({
+            'acc': d['final_avg'] * 100,
+            'bits': (d.get('compression') or {}).get('compression_ratio', 1.0) * 100,
+        })
+    return by
 
-ax1.set_xlabel('Number of Tasks')
-ax1.set_ylabel('Average Accuracy (%)')
-ax1.set_xticks(pmnist['tasks'])
-ax1.legend()
-ax1.grid(True, alpha=0.3)
-ax1.set_ylim(0, 100)
-ax1.text(0.02, 0.98, '(a) Permuted MNIST', transform=ax1.transAxes,
-         fontsize=13, fontweight='bold', va='top')
 
-# Right: Split CIFAR-100
-for method, marker, color in [
-    ('soft_csc', 'o', '#2196F3'), ('replay', 's', '#4CAF50'), ('packnet', '^', '#FF5722')]:
-    label = {'soft_csc': 'Soft CSC', 'replay': 'Replay-only', 'packnet': 'PackNet'}[method]
-    ax2.plot(cifar['tasks'], cifar[method], f'{marker}-', color=color,
-             label=label, markersize=8, linewidth=2)
+def plot(out_pdf: str, by: dict, num_tasks: int):
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    models = sorted(set(k[0] for k in by), key=lambda m: PARAMS_M.get(m, 1.0))
+    for method in METHOD_STYLE:
+        s = METHOD_STYLE[method]
+        xs, ys, errs, bits_list = [], [], [], []
+        for model in models:
+            rows = by.get((model, method))
+            if not rows:
+                continue
+            accs = np.array([r['acc'] for r in rows])
+            bits = np.array([r['bits'] for r in rows])
+            xs.append(PARAMS_M.get(model, np.nan))
+            ys.append(accs.mean())
+            errs.append(accs.std() if len(accs) > 1 else 0.0)
+            bits_list.append(bits.mean())
+        if not xs:
+            continue
+        xs = np.array(xs); ys = np.array(ys); errs = np.array(errs)
+        ax.errorbar(xs, ys, yerr=errs, color=s['color'], ls=s['ls'],
+                    lw=2.2 if method == 'csc' else 1.4,
+                    marker=s['marker'], markersize=9 if method == 'csc' else 6,
+                    markeredgecolor='black', markeredgewidth=0.6,
+                    label=s['label'], capsize=3, alpha=0.95)
+        if method == 'csc':
+            for x, y, b in zip(xs, ys, bits_list):
+                ax.annotate(f'{b:.0f}%', xy=(x, y),
+                            xytext=(0, -18), textcoords='offset points',
+                            fontsize=8, color=s['color'], ha='center',
+                            fontweight='bold')
 
-ax2.set_xlabel('Number of Tasks')
-ax2.set_ylabel('Average Accuracy (%)')
-ax2.set_xticks(cifar['tasks'])
-ax2.legend()
-ax2.grid(True, alpha=0.3)
-ax2.set_ylim(60, 100)
-ax2.text(0.02, 0.98, '(b) Split CIFAR-100', transform=ax2.transAxes,
-         fontsize=13, fontweight='bold', va='top')
+    ax.set_xscale('log')
+    ax.set_xlabel('Model parameters')
+    ax.set_ylabel('Final avg accuracy (%)')
+    # Custom x-tick labels (clear minor ticks first to avoid overlap with log defaults)
+    tick_models = [m for m in models]
+    tick_x = [PARAMS_M[m] for m in tick_models]
+    tick_l = [MODEL_LABELS.get(m, f'{m}\n{PARAMS_M[m]:.1f}M') for m in tick_models]
+    ax.set_xticks(tick_x, minor=False)
+    ax.set_xticks([], minor=True)
+    ax.set_xticklabels(tick_l, minor=False)
+    from matplotlib.ticker import NullFormatter
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.set_title(f'Model-size scaling on {num_tasks}-task Split CIFAR-100')
+    ax.grid(alpha=0.25, which='major')
+    ax.legend(loc='lower right', frameon=True)
+    plt.tight_layout()
+    fig.savefig(out_pdf); fig.savefig(out_pdf.replace('.pdf', '.png'), dpi=180)
+    plt.close(fig)
+    print(f'Wrote: {out_pdf}')
 
-plt.tight_layout()
-os.makedirs('figures', exist_ok=True)
-plt.savefig('figures/scaling_comparison.pdf', bbox_inches='tight')
-print("Saved figures/scaling_comparison.pdf")
 
-# Also generate the LR control figure
-fig2, ax = plt.subplots(figsize=(8, 5))
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--ckpt_dir', default='checkpoints')
+    p.add_argument('--out_dir', default='csc_paper/figures')
+    p.add_argument('--num_tasks', type=int, default=10)
+    p.add_argument('--dataset', default='cifar100', choices=['cifar100'])
+    args = p.parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
+    by = load(args.ckpt_dir, args.dataset, args.num_tasks)
+    print(f'Coverage:')
+    for k in sorted(by):
+        print(f'  {k}: n={len(by[k])}')
+    plot(os.path.join(args.out_dir, 'scaling.pdf'), by, args.num_tasks)
 
-lr_data = {
-    'lr=1e-3': 71.42, 'lr/3': 74.49, 'lr/9': 72.88, 'lr/15': 69.42,
-}
-soft_csc_val = 76.66  # best soft CSC at r=200
 
-x = np.arange(len(lr_data))
-bars = ax.bar(x, list(lr_data.values()), color='#4CAF50', alpha=0.7, label='Replay-only (tuned LR)')
-ax.axhline(y=soft_csc_val, color='#2196F3', linewidth=2, linestyle='--',
-           label=f'Soft CSC (g=0.01, b=1.0): {soft_csc_val}%')
-ax.set_xticks(x)
-ax.set_xticklabels(list(lr_data.keys()))
-ax.set_ylabel('Average Accuracy (%)')
-ax.set_xlabel('Learning Rate')
-ax.legend()
-ax.set_ylim(65, 80)
-ax.grid(True, alpha=0.3, axis='y')
-
-plt.tight_layout()
-plt.savefig('figures/lr_control.pdf', bbox_inches='tight')
-print("Saved figures/lr_control.pdf")
-
-# Pareto frontier figure
-fig3, ax = plt.subplots(figsize=(8, 5))
-
-pareto_data = [
-    (100.0, 71.42, 'Replay-only r=200'),
-    (24.5, 76.12, 'Soft CSC g=0.001'),
-    (22.2, 76.77, 'Soft CSC g=0.005'),
-    (19.1, 76.66, 'Soft CSC g=0.01'),
-    (9.0, 76.10, 'Soft CSC g=0.01 (rel)'),
-    (8.7, 69.67, 'CSC g=0.01 (no prot)'),
-    (20.5, 71.00, 'CSC g=0.001 (no prot)'),
-]
-
-for bits, acc, label in pareto_data:
-    if 'no prot' in label:
-        ax.scatter(bits, acc, color='gray', s=60, zorder=5, alpha=0.6)
-        ax.annotate(label, (bits, acc), fontsize=8, xytext=(5, -10),
-                    textcoords='offset points', color='gray')
-    elif 'Replay' in label:
-        ax.scatter(bits, acc, color='#4CAF50', s=100, marker='s', zorder=5)
-        ax.annotate(label, (bits, acc), fontsize=9, xytext=(5, 5),
-                    textcoords='offset points')
-    else:
-        ax.scatter(bits, acc, color='#2196F3', s=80, zorder=5)
-        ax.annotate(label, (bits, acc), fontsize=8, xytext=(5, -10),
-                    textcoords='offset points')
-
-# Connect Pareto-optimal points
-pareto_pts = sorted([(19.1, 76.66), (22.2, 76.77), (24.5, 76.12)], key=lambda x: x[0])
-ax.plot([p[0] for p in pareto_pts], [p[1] for p in pareto_pts], '--', color='#2196F3', alpha=0.5)
-
-ax.set_xlabel('Bits Remaining (%)')
-ax.set_ylabel('Average Accuracy (%)')
-ax.set_xlim(0, 110)
-ax.set_ylim(65, 80)
-ax.invert_xaxis()
-ax.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig('figures/pareto_frontier.pdf', bbox_inches='tight')
-print("Saved figures/pareto_frontier.pdf")
+if __name__ == '__main__':
+    main()
