@@ -22,6 +22,8 @@ METHODS=${METHODS:-"finetune replay der csc ewc"}
 NUM_TASKS=${NUM_TASKS:-"10 20"}
 SEEDS=${SEEDS:-"42 123 456"}
 EPOCHS=${EPOCHS:-50}
+DATASET=${DATASET:-cifar100}
+DATA_ROOT=${DATA_ROOT:-/capstor/scratch/cscs/mkalcher/datasets/cifar100}
 
 uenv run prgenv-gnu/24.11:v2 --view=modules -- bash -lc "
 set -uo pipefail
@@ -32,13 +34,15 @@ export PYTHONNOUSERSITE=1
 git pull --ff-only origin main 2>/dev/null || true
 mkdir -p checkpoints
 
-# Pre-download CIFAR-100 in a single process so the parallel launch below
-# does not race on partial file writes (which produced UnpicklingError /
-# 'Dataset not found or corrupted' crashes in earlier sweeps).
-echo \"Pre-downloading CIFAR-100 (idempotent if already cached)...\"
-python -c \"import torchvision; torchvision.datasets.CIFAR100(root='/capstor/scratch/cscs/mkalcher/datasets/cifar100', train=True, download=True); torchvision.datasets.CIFAR100(root='/capstor/scratch/cscs/mkalcher/datasets/cifar100', train=False, download=True)\"
+# Pre-download dataset once so parallel launches don't race on partial writes.
+echo \"Pre-downloading dataset $DATASET to $DATA_ROOT (idempotent)...\"
+if [ \"$DATASET\" = \"cifar100\" ]; then
+    python -c \"import torchvision; torchvision.datasets.CIFAR100(root='$DATA_ROOT', train=True, download=True); torchvision.datasets.CIFAR100(root='$DATA_ROOT', train=False, download=True)\"
+elif [ \"$DATASET\" = \"pmnist\" ]; then
+    python -c \"import torchvision; torchvision.datasets.MNIST(root='$DATA_ROOT', train=True, download=True); torchvision.datasets.MNIST(root='$DATA_ROOT', train=False, download=True)\"
+fi
 
-echo \"GPU supervised sweep at \$(date)\"
+echo \"GPU supervised sweep at \$(date) [dataset=$DATASET]\"
 echo \"Methods: $METHODS\"; echo \"Num tasks: $NUM_TASKS\"; echo \"Seeds: $SEEDS\"
 
 PIDS=()
@@ -57,11 +61,12 @@ for method in $METHODS; do
         for seed in $SEEDS; do
             gpu=\$((i % 4))
             tag=\"_t\${nt}\"
-            log=\"checkpoints/sup_\${method}_t\${nt}_s\${seed}.log\"
+            log=\"checkpoints/sup_${DATASET}_\${method}_t\${nt}_s\${seed}.log\"
             echo \"[GPU \$gpu] \${method} t\${nt} s\${seed} -> \${log}\"
             CUDA_VISIBLE_DEVICES=\$gpu python -u experiments/run_supervised.py \\
-                --method \$method --num_tasks \$nt --epochs_per_task $EPOCHS \\
-                --seed \$seed \$args --data_root /capstor/scratch/cscs/mkalcher/datasets/cifar100 \\
+                --dataset $DATASET --method \$method --num_tasks \$nt \\
+                --epochs_per_task $EPOCHS \\
+                --seed \$seed \$args --data_root $DATA_ROOT \\
                 > \"\$log\" 2>&1 &
             PIDS+=(\$!)
             i=\$((i+1))
