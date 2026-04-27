@@ -24,6 +24,7 @@ SEEDS=${SEEDS:-"42 123 456"}
 EPOCHS=${EPOCHS:-50}
 DATASET=${DATASET:-cifar100}
 DATA_ROOT=${DATA_ROOT:-/capstor/scratch/cscs/mkalcher/datasets/cifar100}
+MODEL=${MODEL:-resnet18}
 
 uenv run prgenv-gnu/24.11:v2 --view=modules -- bash -lc "
 set -uo pipefail
@@ -61,11 +62,13 @@ for method in $METHODS; do
         for seed in $SEEDS; do
             gpu=\$((i % 4))
             tag=\"_t\${nt}\"
-            log=\"checkpoints/sup_${DATASET}_\${method}_t\${nt}_s\${seed}.log\"
-            echo \"[GPU \$gpu] \${method} t\${nt} s\${seed} -> \${log}\"
+            mname_part=\"\"
+            [ \"$MODEL\" != \"resnet18\" ] && mname_part=\"_$MODEL\"
+            log=\"checkpoints/sup_${DATASET}_\${method}\${mname_part}_t\${nt}_s\${seed}.log\"
+            echo \"[GPU \$gpu] \${method} \${MODEL} t\${nt} s\${seed} -> \${log}\"
             CUDA_VISIBLE_DEVICES=\$gpu python -u experiments/run_supervised.py \\
-                --dataset $DATASET --method \$method --num_tasks \$nt \\
-                --epochs_per_task $EPOCHS \\
+                --dataset $DATASET --method \$method --model $MODEL \\
+                --num_tasks \$nt --epochs_per_task $EPOCHS \\
                 --seed \$seed \$args --data_root $DATA_ROOT \\
                 > \"\$log\" 2>&1 &
             PIDS+=(\$!)
