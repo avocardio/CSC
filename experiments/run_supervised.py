@@ -469,6 +469,8 @@ def main():
                             'convnext_tiny', 'mlp'])
     p.add_argument('--data_root', default='/mnt/e/datasets/cifar100')
     p.add_argument('--tag', default='')
+    p.add_argument('--save_model_final', action='store_true',
+                   help='Save final model state_dict for post-hoc analysis (PTQ etc.)')
     args = p.parse_args()
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
@@ -607,6 +609,17 @@ def main():
     with open(out_path, 'w') as f:
         json.dump(out, f, indent=2)
     print(f'Saved: {out_path}', flush=True)
+
+    if args.save_model_final:
+        pt_path = out_path.replace('.json', '_final.pt')
+        torch.save({'model': model.state_dict(),
+                    'classes_per_task': classes_per_task,
+                    'num_tasks': args.num_tasks,
+                    'seed': args.seed,
+                    'method': args.method,
+                    'model_arch': args.model,
+                    'dataset': args.dataset}, pt_path)
+        print(f'Saved model: {pt_path}', flush=True)
 
 
 if __name__ == '__main__':
