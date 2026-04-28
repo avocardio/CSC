@@ -46,6 +46,7 @@ def load_matrices(ckpt_dir: str, num_tasks: int, dataset: str,
     cifar100, mlp for pmnist; skip tag'd ablation runs."""
     if model is None:
         model = 'mlp' if dataset == 'pmnist' else 'resnet18'
+    default_model = 'mlp' if dataset == 'pmnist' else 'resnet18'
     by_method: dict[str, list] = defaultdict(list)
     for f in sorted(glob.glob(os.path.join(ckpt_dir, 'sup_*.json'))):
         d = json.load(open(f))
@@ -54,7 +55,10 @@ def load_matrices(ckpt_dir: str, num_tasks: int, dataset: str,
             continue
         if cfg.get('num_tasks') != num_tasks:
             continue
-        if cfg.get('model', 'resnet18') != model:
+        # Old PMNIST JSONs may still report model='resnet18' (the runner default);
+        # the actual architecture is always MLP for pmnist, so don't filter by model
+        # for pmnist runs.
+        if dataset != 'pmnist' and cfg.get('model', default_model) != model:
             continue
         if cfg.get('tag', ''):
             continue
@@ -66,13 +70,17 @@ def load_aggregates(ckpt_dir: str, num_tasks: int, dataset: str,
                     model: str | None = None) -> dict:
     if model is None:
         model = 'mlp' if dataset == 'pmnist' else 'resnet18'
+    default_model = 'mlp' if dataset == 'pmnist' else 'resnet18'
     by: dict[str, list] = defaultdict(list)
     for f in sorted(glob.glob(os.path.join(ckpt_dir, 'sup_*.json'))):
         d = json.load(open(f))
         cfg = d['config']
         if cfg.get('dataset', 'cifar100') != dataset or cfg.get('num_tasks') != num_tasks:
             continue
-        if cfg.get('model', 'resnet18') != model:
+        # Old PMNIST JSONs may still report model='resnet18' (the runner default);
+        # the actual architecture is always MLP for pmnist, so don't filter by model
+        # for pmnist runs.
+        if dataset != 'pmnist' and cfg.get('model', default_model) != model:
             continue
         if cfg.get('tag', ''):
             continue

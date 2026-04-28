@@ -40,6 +40,7 @@ def load_matrices(ckpt_dir: str, num_tasks: int, dataset: str = 'cifar100',
     cifar100, mlp for pmnist. Skip tag'd ablation runs."""
     if model is None:
         model = 'mlp' if dataset == 'pmnist' else 'resnet18'
+    default_model = 'mlp' if dataset == 'pmnist' else 'resnet18'
     by_method: dict[str, list] = defaultdict(list)
     for f in sorted(glob.glob(os.path.join(ckpt_dir, 'sup_*.json'))):
         d = json.load(open(f))
@@ -47,7 +48,9 @@ def load_matrices(ckpt_dir: str, num_tasks: int, dataset: str = 'cifar100',
         ds = cfg.get('dataset', 'cifar100')
         if ds != dataset or cfg.get('num_tasks') != num_tasks:
             continue
-        if cfg.get('model', 'resnet18') != model:
+        # Old PMNIST JSONs may still report model='resnet18' (runner default);
+        # actual arch is always MLP for pmnist, so skip the filter there.
+        if dataset != 'pmnist' and cfg.get('model', default_model) != model:
             continue
         if cfg.get('tag', ''):
             continue
