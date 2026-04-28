@@ -20,10 +20,18 @@ class CompressionGranularity(Enum):
 
 
 class STERound(torch.autograd.Function):
-    """Round with straight-through estimator for gradients."""
+    """Round with straight-through estimator for gradients.
+    `setup_context` split out + generate_vmap_rule so the function works with
+    functorch (vmap/grad), which is needed for the EWC Fisher pass when CSC is on."""
+    generate_vmap_rule = True
+
     @staticmethod
-    def forward(ctx, x):
+    def forward(x):
         return torch.round(x)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        pass
 
     @staticmethod
     def backward(ctx, grad_output):

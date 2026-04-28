@@ -176,6 +176,32 @@ class SoftProtect:
                 W.grad.mul_(scale.view(-1, 1))               # Linear (O, I)
 
 
+def bd_as_fisher(soft_protect: 'SoftProtect', ewc: 'EWCRegularizer'):
+    """csc_bd_ewc helper: copy CSC's accumulated per-channel bit-depths into
+    EWCRegularizer.fisher (broadcast over fan-in), and snapshot params. Used in
+    place of EWCRegularizer.on_task_end() when --method=csc_bd_ewc — tests
+    whether the bit-depth signal serves as a Fisher proxy."""
+    ewc._snapshot_params()
+    name_to_module = {n: m for n, m in soft_protect.model.named_modules()}
+    for mod_name, acc in soft_protect.acc_bits.items():
+        m = name_to_module.get(mod_name)
+        if m is None:
+            continue
+        W = _module_weight(m)
+        # Find the parameter name for this weight (need to match model.named_parameters key)
+        for pname, p in soft_protect.model.named_parameters():
+            if p is W:
+                break
+        else:
+            continue
+        bd = acc.detach().clamp(min=1e-8)                # avoid 0 importance
+        if W.dim() == 4:
+            f = bd.view(-1, 1, 1, 1).expand_as(W).contiguous()
+        else:
+            f = bd.view(-1, 1).expand_as(W).contiguous()
+        ewc.fisher[pname] = ewc.fisher.get(pname, torch.zeros_like(f)) + f
+
+
 # ============================================================
 # EWC (light, supervised version — empirical Fisher)
 # ============================================================
@@ -211,6 +237,11 @@ class EWCRegularizer:
         device = next(self.model.parameters()).device
         F_acc = {n: torch.zeros_like(params[n]) for n in names}
 
+        # Eval mode disables BN's num_batches_tracked.add_ which cannot run under
+        # vmap/grad. Restored after the Fisher pass.
+        was_training = self.model.training
+        self.model.eval()
+
         def f_logp(p_dict, x_one, y_one):
             x = x_one.unsqueeze(0)
             logits = functional_call(self.model, p_dict, args=(x,),
@@ -230,6 +261,9 @@ class EWCRegularizer:
         for n in names:
             f = (F_acc[n] / max(n_done, 1)).clamp(min=1e-8)
             self.fisher[n] = self.fisher.get(n, torch.zeros_like(f)) + f
+
+        if was_training:
+            self.model.train()
 
 
 # ============================================================
@@ -402,7 +436,8 @@ def train_one_task(model, train_loader, task_id: int, n_epochs: int, lr: float,
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--method', required=True,
-                   choices=['finetune', 'replay', 'der', 'ewc', 'packnet', 'csc'])
+                   choices=['finetune', 'replay', 'der', 'ewc', 'packnet', 'csc',
+                            'csc_ewc', 'csc_bd_ewc'])
     p.add_argument('--num_tasks', type=int, default=10)
     p.add_argument('--epochs_per_task', type=int, default=50)
     p.add_argument('--batch_size', type=int, default=128)
@@ -442,7 +477,7 @@ def main():
         torch.backends.cudnn.benchmark = True
 
     device = DEVICE
-    quantize = (args.method == 'csc')
+    quantize = args.method in ('csc', 'csc_ewc', 'csc_bd_ewc')
 
     # Dataset + model factory
     if args.dataset == 'cifar100':
@@ -488,9 +523,13 @@ def main():
 
     use_replay = args.method in ('replay', 'der', 'csc') and args.replay_per_task > 0
     use_der = args.method == 'der' or (args.method == 'csc' and args.der_alpha > 0)
-    use_ewc = args.method == 'ewc'
+    # csc_ewc: vanilla EWC penalty + CSC compression + soft-protect, no replay/DER.
+    # csc_bd_ewc: same, but the EWC penalty's importance weight is the per-channel
+    #             bit-depth (broadcast over fan-in) instead of the empirical Fisher.
+    use_ewc = args.method in ('ewc', 'csc_ewc', 'csc_bd_ewc')
     use_pn = args.method == 'packnet'
-    use_csc = args.method == 'csc'
+    use_csc = args.method in ('csc', 'csc_ewc', 'csc_bd_ewc')
+    use_bd_ewc = args.method == 'csc_bd_ewc'
 
     replay = ReplayBuffer(device) if use_replay else None
     soft = SoftProtect(model, beta=args.soft_beta) if use_csc else None
@@ -525,7 +564,12 @@ def main():
                             store_logits=use_der)
         if use_csc:
             soft.on_task_end()
-        if use_ewc:
+        if use_bd_ewc:
+            # Use CSC's per-channel bit-depth as the EWC importance weight.
+            # No Fisher pass — this is the "bit-depth IS Fisher, computed for free"
+            # ablation. Requires soft.on_task_end() to have run first.
+            bd_as_fisher(soft, ewc)
+        elif use_ewc:
             ewc.on_task_end(train_loader, task_id, n_batches=20)
 
         accs = evaluate_all_tasks(model, benchmark, task_id + 1, device)
