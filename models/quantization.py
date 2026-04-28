@@ -129,6 +129,7 @@ class DifferentiableQuantizer(nn.Module):
             self.param_shape = weight_shape
 
         self.num_params = num_params
+        self.init_bit_depth = float(init_bit_depth)
         self.bit_depth = nn.Parameter(torch.full((num_params,), init_bit_depth))
         self.exponent = nn.Parameter(torch.full((num_params,), init_exponent))
 
@@ -292,12 +293,23 @@ def get_compression_stats(model):
         zero_channels += zero_mask.sum().item()
         total_channels += q.num_output_channels
 
+    # Per-channel bit-depth histogram (for the "smart allocation" plot).
+    bd_all = []
+    init_bit = 8.0
+    for q in quantizers:
+        bd = q.get_channel_bit_depths().detach().cpu().clamp(min=0).tolist()
+        bd_all.extend(bd)
+        # capture init_bit from any quantizer (they all share it in our setup)
+        init_bit = float(getattr(q, 'init_bit_depth', init_bit))
     return {
         'total_weights': total_weights,
         'total_bits': total_bits,
         'original_bits': original_bits,
         'compression_ratio': total_bits / original_bits if original_bits > 0 else 0,
         'avg_bit_depth': total_bits / total_weights if total_weights > 0 else 0,
+        'init_bit_depth': init_bit,
+        'utilization_8b': (total_bits / total_weights) / init_bit if total_weights > 0 else 0,
+        'channel_bit_depths': bd_all,
         'zero_channels': zero_channels,
         'total_channels': total_channels,
         'channels_remaining_pct': 100 * (1 - zero_channels / total_channels) if total_channels > 0 else 100,
