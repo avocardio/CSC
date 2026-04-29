@@ -1,0 +1,134 @@
+NEW PAPER SKELETON — written 2026-04-29
+=========================================
+
+This file is a checkpoint of the new paper framing AFTER the failed
+"compression solves CL" framing was abandoned and replaced with the
+"compression discovers Fisher information for free" framing. Read this
+first if context has compacted.
+
+WORKING TITLE
+-------------
+"Self-Compression as a Free Importance Signal for Continual Learning"
+(or) "Discovering Fisher Information through Differentiable Compression"
+
+WHAT FAILED (so we don't accidentally re-pursue):
+-------------------------------------------------
+1. "CSC alone solves CL" — empirically wrong. CSC-alone (no replay/DER, no EWC):
+   36.12 ± 2.95 ≈ Finetune 36.50 ± 3.29. Soft-protect's gradient scaling is
+   too uniform at γ=10⁻³ (bit-depth distribution narrow: mean 6.79 of 8,
+   std 0.75, all in [5.96, 8.0]).
+
+2. "Smart bit allocation across tasks" — empirically dead. No freed channels,
+   no specialists, no bimodality. The compression dynamics produce a graded
+   but narrow distribution, not a specialised one.
+
+3. "Capacity-efficiency wrapper" — beaten by trivial PTQ baseline. Naive 8-bit
+   PTQ of DER++: 81.02 ≈ CSC+DER++ 81.24. CSC operates entirely in the
+   precision regime where uniform PTQ is essentially lossless.
+
+4. "Higher γ_comp would help" — Csefalvay quantiser has b=0 absorbing state.
+   Once a channel hits 0 output, task gradient ⇒ 0, no recovery. Higher γ
+   produces irreversible pruning, not specialisation.
+
+5. "Method modification (γ schedule)" — BLIP (Shi et al. CVPR 2021) already
+   does per-task bit allocation with hard freezing. Reviewer pushback would
+   be immediate.
+
+WHAT SURVIVED (the new core)
+----------------------------
+1. **Fisher correlation** (the cleanest novel finding):
+   - rho(b, F) = +0.832 ± 0.026 across 3 seeds, R18 / Split CIFAR-100, t=0.
+   - Partial Spearman controlling for |w|: rho(b, F | |w|) = +0.826 ± 0.026.
+   - The +0.006 drop confirms it's NOT a magnitude artefact.
+   - Csc_bd_ewc (replace EWC's Fisher with bit-depth) reaches 46.7% vs
+     CSC-alone 36.1% vs EWC-with-real-Fisher 72.5%. Bit-depth captures
+     real but partial Fisher information.
+
+2. **Bd warm-start adds +2pp to EWC at every K**:
+   - K=1: ewc 72.31 → csc_bd_ewc_warm 74.18  (+1.87)
+   - K=2: ewc 72.53 → 74.52  (+1.99)
+   - K=5: ewc 72.56 → 74.45  (+1.89)
+   - K=10: ewc 72.56 → 74.45  (+1.89)
+   - K=20: ewc 71.41 → 74.27  (+2.86)
+   Bit-depth carries information COMPLEMENTARY to empirical Fisher.
+
+3. **Bd as omega beats MAS-omega in Online-LoRA by +6.4pp**:
+   - Reproduction of Online-LoRA WACV 2025 with minimal CSC hooks:
+     olora_mas:     13.82 ± 3.10
+     olora_csc_mas: 13.20 ± 0.47   (CSC quant, MAS signal — control)
+     olora_csc_bd:  20.17 ± 1.55   (CSC quant, BD signal)
+   - csc_mas ≈ baseline → win comes from the SIGNAL, not from compression.
+   - CAVEAT: absolute numbers are well below published Online-LoRA (~60%);
+     hyperparameters need work (Phase 1 of the new plan).
+
+4. **RL ClonEx-SAC**: independent contribution; CSC composes with BC distill
+   in Continual World (csc_clonex 69.5% ± 10.0% vs ClonEx 69.0% ± 9.0% —
+   tied; the diagnosis story stands).
+
+NEUROBIO GROUNDING (still load-bearing, now MORE so)
+----------------------------------------------------
+- Efficient-coding hypothesis (Barlow 1961) + sparse coding (Olshausen &
+  Field 1996): networks SHOULD learn compressed representations because
+  that's what works. Our finding: compression dynamics produce a
+  Fisher-aligned importance signal as a side effect.
+- Synaptic homeostasis (Tononi & Cirelli 2014): during sleep, synapses are
+  globally down-scaled with selective preservation. Bit-depth is exactly
+  this — always-on, no task boundary, selective.
+- CLS theory (McClelland 1995): the brain doesn't compute Fisher on a
+  hard buffer of 4 samples; it has continuous metabolic precision signals.
+- MDL (Hinton & van Camp 1993) + IB (Tishby 2000): minimum description
+  length naturally yields parameter importance.
+
+CORE CONTRIBUTIONS (NEW)
+------------------------
+1. Compression dynamics through differentiable per-channel bit-depth
+   produce a learned importance signal correlated with empirical Fisher
+   at rho ≈ 0.83 (controlling for weight magnitude). The signal is
+   continuously updated at zero extra cost (no per-task Fisher pass).
+
+2. The signal is COMPLEMENTARY to empirical Fisher: bd warm-start lifts
+   EWC by ~2pp on Split CIFAR-100 (R18) at every batch budget K ∈ {1..20}.
+
+3. The signal REPLACES MAS-style omega in task-free Online-LoRA on
+   ViT-B/16 with +6.4pp accuracy gain over their 4-sample MAS gradient.
+   Also a drift detector candidate (untested).
+
+4. The mechanism extends to off-policy continual RL (cw_subset on
+   Continual World): csc_clonex matches ClonEx-SAC at zero accuracy cost.
+
+5. Theoretical link from differentiable bit-depth gradient through STE
+   to channel-wise Fisher information (Jensen lower bound).
+
+PLANNED EXPERIMENTAL SCOPE
+--------------------------
+Architectures: R18, R50, R101, ConvNeXt-T, ViT-S, ViT-B
+Datasets: Split CIFAR-100, ImageNet-R, ImageNet-Sketch, CUB-200, CORe50
+Task counts: 10, 20, 50
+Seeds: 5 minimum for headlines
+Baselines:
+ - vanilla: Finetune, ER, DER++, EWC, MAS, SI, L2
+ - architecture: PackNet, BLIP
+ - prompt: L2P, DualPrompt, CODA-Prompt, MVP
+ - task-free: Online-LoRA, MIR, ER-AML
+RL: cw_subset and full CW10 with bd-as-MAS importance.
+
+OPEN QUESTIONS / UNRESOLVED
+---------------------------
+- Why don't our Online-LoRA absolute numbers match published? (Phase 1)
+- Does bd-as-MAS work for RL too? (Phase 4, idea F)
+- Does the signal scale to ViT-L / Swin / LLM? (Future work)
+- Does bd-based replay-prioritisation work? (Future work)
+
+TODO (high level, ordered)
+--------------------------
+0. (DONE) Save this skeleton.
+1. Reproduce Online-LoRA published baseline on CIFAR-100.
+2. Add RL bd-as-MAS (idea F) implementation + smoke test + sweep.
+3. Bd warm-start (Exp B style) on R50/R101/ConvNeXt-T.
+4. Online-LoRA + CSC at scale: ImageNet-R, ImageNet-Sketch, CUB-200, CORe50.
+5. Importance-signal ablations (random/Fisher/|w|/bd controls).
+6. Add prompt-based baselines (L2P, DualPrompt, CODA-Prompt, MVP).
+7. (Optional) Federated CL bd-bandwidth experiment.
+8. Statistical rigor: 5 seeds, paired t-tests, error bars on every headline.
+9. Paper rewrite (LAST): abstract, intro (with bio motivation),
+   theory section, experiments, related work, conclusions.

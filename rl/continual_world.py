@@ -339,13 +339,16 @@ class SACAgent:
         self.lr = lr
         self.lr_quant = lr_quant
 
-        self.use_csc = method in ('csc', 'csc_clonex')
+        self.use_csc = method in ('csc', 'csc_clonex', 'csc_bd_mas')
         # SAC-replay: replay batch enters actor/critic loss directly.
         self.use_replay = method in ('replay', 'csc', 'ewc_replay')
         # BC-replay (ClonEx-style): old data feeds BC loss only, never SAC actor/critic.
         self.use_bc_replay = method in ('clonex', 'csc_clonex')
         self.use_ewc = method in ('ewc', 'ewc_replay')
-        self.use_mas = method == 'mas'
+        # csc_bd_mas: same penalty form as MAS but the per-channel importance is
+        # the accumulated bit-depth instead of the |grad(||mu||^2+||logstd||^2)|.
+        self.use_mas = method in ('mas', 'csc_bd_mas')
+        self.use_bd_mas = method == 'csc_bd_mas'
         self.use_l2 = method == 'l2'
         self.use_packnet = method == 'packnet'
         self.shared_alpha = shared_alpha
@@ -571,7 +574,10 @@ class SACAgent:
         if self.use_ewc:
             self._compute_ewc_fisher(buffer, task_idx)
         if self.use_mas:
-            self._compute_mas_importance(buffer, task_idx)
+            if self.use_bd_mas:
+                self._compute_bd_importance()
+            else:
+                self._compute_mas_importance(buffer, task_idx)
         if self.use_l2:
             for n, p in self.actor.named_parameters():
                 self.l2_params[n] = p.data.clone()
@@ -687,6 +693,40 @@ class SACAgent:
         max_f = max(f.max().item() for f in self.ewc_fisher.values())
         mean_f = sum(f.mean().item() for f in self.ewc_fisher.values()) / len(self.ewc_fisher)
         print(f'    EWC Fisher: max={max_f:.4f} mean={mean_f:.4f}', flush=True)
+
+    def _compute_bd_importance(self):
+        """csc_bd_mas: replace _compute_mas_importance's per-sample gradient
+        accumulation with per-channel bit-depth from the active quantizers.
+        Same `mas_imp` / `mas_params` storage as MAS so the existing penalty
+        term in update() works unmodified.
+        """
+        params = {n: p.detach() for n, p in self.actor.named_parameters()}
+        for n, p in self.actor.named_parameters():
+            if 'quantizer' in n:
+                continue
+            self.mas_params[n] = p.detach().clone()
+
+        # Map QuantizedLinear core layers -> their per-channel accumulated bit
+        # depth. The actor's quantized layers are fc1..fc4 (one quantizer each).
+        # For each such layer, broadcast its (out_channels,) bit-depth to the
+        # weight shape (out, in) and store in mas_imp[layer_name + '.linear.weight'].
+        for layer_idx, layer in enumerate(self.actor.core_layers()):
+            # core_layers returns the quantized fc modules (RL QuantizedLinear
+            # exposes .weight directly, not .linear.weight as the supervised one).
+            b = layer.quantizer.get_channel_bit_depths().detach().clamp(min=0)
+            for n, p in self.actor.named_parameters():
+                if p is layer.weight:
+                    pname = n
+                    break
+            else:
+                continue
+            W_shape = layer.weight.shape
+            imp = b.view(-1, 1).expand(W_shape).contiguous()
+            # Normalise to typical MAS magnitude. MAS imp is O(1e-4..1e-2) on
+            # this benchmark; bd is O(0..8). Scale by 1/8 (init_bit_depth) so
+            # imp is in [0, 1]. cl_reg_coef tunes overall strength.
+            imp = imp / 8.0
+            self.mas_imp[pname] = self.mas_imp.get(pname, torch.zeros_like(imp)) + imp
 
     def _compute_mas_importance(self, buffer: ReplayBuffer, task_idx: int,
                                 n_batches: int = 10, bs: int = 256):
@@ -974,7 +1014,7 @@ def main():
     p.add_argument('--method', required=True,
                    choices=['finetune', 'l2', 'ewc', 'mas', 'replay',
                             'ewc_replay', 'packnet', 'csc',
-                            'clonex', 'csc_clonex'])
+                            'clonex', 'csc_clonex', 'csc_bd_mas'])
     p.add_argument('--steps_per_task', type=int, default=1_000_000)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--cl_reg_coef', type=float, default=1e4,
