@@ -8,6 +8,11 @@ def get_args_parser(subparsers):
     # Regularization parameters
     subparsers.add_argument('--MAS-weight', type=float, default=2000.0, help='weight of regularization')
     subparsers.add_argument('--hard-buffer-size', type=int, default=4, help='size of hard buffer')
+
+    # CSC integration
+    subparsers.add_argument('--csc', action='store_true', default=False)
+    subparsers.add_argument('--gamma_comp', type=float, default=0.0)
+    subparsers.add_argument('--importance', type=str, default='mas', choices=['mas', 'bd'])
     # Abalation study
     subparsers.add_argument('--hard-loss', dest='hard_loss', action='store_true', default=True, help='is hard buffer loss included in the loss function')
     subparsers.add_argument('--no-hard-loss', dest='hard_loss', action='store_false')

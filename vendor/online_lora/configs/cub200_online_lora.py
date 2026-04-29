@@ -9,6 +9,11 @@ def get_args_parser(subparsers):
     subparsers.add_argument('--MAS-weight', type=float, default=2000.0, help='weight of regularization')
     subparsers.add_argument('--hard-buffer-size', type=int, default=8, help='size of hard buffer')
 
+    # CSC integration
+    subparsers.add_argument('--csc', action='store_true', default=False)
+    subparsers.add_argument('--gamma_comp', type=float, default=0.0)
+    subparsers.add_argument('--importance', type=str, default='mas', choices=['mas', 'bd'])
+
     # Loss surface parameters
     subparsers.add_argument('--loss-window-length', type=int, default=5, help='length of loss window')
     subparsers.add_argument('--loss-window-mean-threshold', type=float, default=6.0, help='threshold of loss window mean')
