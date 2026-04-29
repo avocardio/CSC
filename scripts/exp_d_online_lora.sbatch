@@ -50,7 +50,13 @@ for cfg in olora_mas olora_csc_mas olora_csc_bd; do
     log="../../output_olora/${cfg}_s${seed}.log"
     mkdir -p "$out_dir"
     echo "[GPU $gpu] $cfg seed=$seed -> $out_dir"
-    CUDA_VISIBLE_DEVICES=$gpu python -u main.py \
+    # Unset SLURM_* so init_distributed_mode falls through to "not distributed"
+    # (we manage parallelism ourselves via 4 GPUs in one node).
+    env -u SLURM_PROCID -u SLURM_NPROCS -u SLURM_NTASKS -u SLURM_TASKS_PER_NODE \
+        -u RANK -u WORLD_SIZE -u LOCAL_RANK \
+        CUDA_VISIBLE_DEVICES=$gpu \
+        PYTHONPATH=. \
+        python -u main.py \
         cifar100_online_lora \
         --model vit_base_patch16_224 \
         --batch-size 64 \
