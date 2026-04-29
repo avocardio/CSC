@@ -2457,3 +2457,28 @@ no value computed only in console gets lost.
   - p3_warmstart_archs.sbatch: csc_bd_ewc_warm K-sweep on R50/R101/CNxT
   - csc_bd_mas implemented in rl/continual_world.py (P4.1) + smoke test
 
+2026-04-29 11:15 | FIX | Found Online-LoRA appendix B Table 8 with the
+  exact published thresholds for the loss-window detector:
+    CIFAR-100:    mean=2.6,  var=0.03
+    ImageNet-R:   mean=5.2,  var=0.02
+    ImageNet-S:   mean=5.6,  var=0.06
+    CORe50:       mean=6.0,  var=0.1
+    CUB-200:      mean=24.0, var=1.0
+  My earlier sweep used 5.2/0.02 → 6.0/0.1 (none matched 2.6/0.03).
+  This is why the loss never crossed below threshold and importance
+  updates never triggered — explains the ~14% absolute results.
+  Cancelled job 1984288 and resubmitted as 1984315 with the published
+  CIFAR-100 thresholds. λ=2000 confirmed for all datasets.
+
+2026-04-29 11:10 | LAUNCH-WAVE-2 | Six jobs in queue / running:
+  1984288 olora_repro (P1.1, ~4h)
+  1984289 p3_warm    (P3.1+P3.2+P3.3, ~6h)
+  1984290 p4_bdmas   (P4.2 RL csc_bd_mas, ~12h CPU)
+  1984298 p5_abl     (P5.2 gamma_comp sweep + P5.3 bd_init_scale sweep, ~6h)
+  1984299 p3_pmnist  (P3.4 PMNIST MLP warm-start, ~6h)
+  1984309 p5_1_ctrl  (P5.1 importance-signal controls — bd vs random vs |w|, ~4h)
+
+  All experiments save full per-channel bit-depth + accuracy_matrix +
+  compression stats to JSON (no info lost on completion).
+  log.txt updated with NEW-DIRECTION section above.
+
