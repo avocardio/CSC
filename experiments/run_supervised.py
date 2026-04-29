@@ -437,7 +437,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--method', required=True,
                    choices=['finetune', 'replay', 'der', 'ewc', 'packnet', 'csc',
-                            'csc_ewc', 'csc_bd_ewc'])
+                            'csc_ewc', 'csc_bd_ewc', 'csc_bd_ewc_warm'])
     p.add_argument('--num_tasks', type=int, default=10)
     p.add_argument('--epochs_per_task', type=int, default=50)
     p.add_argument('--batch_size', type=int, default=128)
@@ -457,6 +457,12 @@ def main():
     p.add_argument('--bias_l1', type=float, default=0.0)
     # EWC
     p.add_argument('--ewc_lambda', type=float, default=1000.0)
+    p.add_argument('--ewc_n_batches', type=int, default=20,
+                   help='Batches used for empirical Fisher pass (default 20).')
+    p.add_argument('--bd_init_scale', type=float, default=1e-3,
+                   help='Scale factor when initialising EWC fisher from bit-depth '
+                        '(csc_bd_ewc_warm). Brings bd values close to typical '
+                        'empirical Fisher magnitude so they compose meaningfully.')
     # PackNet
     p.add_argument('--prune', type=float, default=0.75)
     p.add_argument('--retrain_epochs', type=int, default=10)
@@ -528,10 +534,14 @@ def main():
     # csc_ewc: vanilla EWC penalty + CSC compression + soft-protect, no replay/DER.
     # csc_bd_ewc: same, but the EWC penalty's importance weight is the per-channel
     #             bit-depth (broadcast over fan-in) instead of the empirical Fisher.
-    use_ewc = args.method in ('ewc', 'csc_ewc', 'csc_bd_ewc')
+    # csc_bd_ewc_warm: bd initialises EWC's fisher (scaled), then refine with K
+    #                  batches of empirical Fisher on top — quantifies how cheap
+    #                  Fisher refinement gets when warm-started from bd.
+    use_ewc = args.method in ('ewc', 'csc_ewc', 'csc_bd_ewc', 'csc_bd_ewc_warm')
     use_pn = args.method == 'packnet'
-    use_csc = args.method in ('csc', 'csc_ewc', 'csc_bd_ewc')
+    use_csc = args.method in ('csc', 'csc_ewc', 'csc_bd_ewc', 'csc_bd_ewc_warm')
     use_bd_ewc = args.method == 'csc_bd_ewc'
+    use_bd_ewc_warm = args.method == 'csc_bd_ewc_warm'
 
     replay = ReplayBuffer(device) if use_replay else None
     soft = SoftProtect(model, beta=args.soft_beta) if use_csc else None
@@ -567,12 +577,19 @@ def main():
         if use_csc:
             soft.on_task_end()
         if use_bd_ewc:
-            # Use CSC's per-channel bit-depth as the EWC importance weight.
-            # No Fisher pass — this is the "bit-depth IS Fisher, computed for free"
-            # ablation. Requires soft.on_task_end() to have run first.
+            # bd as Fisher proxy, no real Fisher pass.
             bd_as_fisher(soft, ewc)
+        elif use_bd_ewc_warm:
+            # Warm-start: scale bd to ~Fisher magnitude, then refine with K batches.
+            # bd values are O(1)-O(10); Fisher values are typically O(1e-4)-O(1e-3),
+            # so we multiply bd by args.bd_init_scale before storing in ewc.fisher.
+            bd_as_fisher(soft, ewc)
+            # Rescale the bd-init component so it doesn't dominate the refinement.
+            for n in list(ewc.fisher.keys()):
+                ewc.fisher[n] = ewc.fisher[n] * args.bd_init_scale
+            ewc.on_task_end(train_loader, task_id, n_batches=args.ewc_n_batches)
         elif use_ewc:
-            ewc.on_task_end(train_loader, task_id, n_batches=20)
+            ewc.on_task_end(train_loader, task_id, n_batches=args.ewc_n_batches)
 
         accs = evaluate_all_tasks(model, benchmark, task_id + 1, device)
         cl_metrics.update(task_id, accs)
