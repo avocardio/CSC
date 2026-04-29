@@ -521,7 +521,8 @@ def main():
         torch.backends.cudnn.benchmark = True
 
     device = DEVICE
-    quantize = args.method in ('csc', 'csc_ewc', 'csc_bd_ewc')
+    quantize = args.method in ('csc', 'csc_ewc', 'csc_bd_ewc', 'csc_bd_ewc_warm',
+                               'csc_random_ewc', 'csc_magnitude_ewc')
 
     # Dataset + model factory
     if args.dataset == 'cifar100':
