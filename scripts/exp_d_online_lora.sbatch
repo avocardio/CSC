@@ -61,10 +61,10 @@ for cfg in olora_mas olora_csc_mas olora_csc_bd; do
         --model vit_base_patch16_224 \
         --batch-size 64 \
         --MAS-weight 2000 \
-        --lr 0.0002 \
+        --lr 0.0001 \
         --num_tasks 10 \
-        --loss-window-variance-threshold 0.1 \
-        --loss-window-mean-threshold 6.0 \
+        --loss-window-variance-threshold 0.03 \
+        --loss-window-mean-threshold 2.6 \
         --data-path "$DATA_DIR" \
         --seed $seed \
         --output_dir "$out_dir" \
