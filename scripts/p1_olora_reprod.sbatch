@@ -30,11 +30,12 @@ cd vendor/online_lora
 
 DATA_DIR=/capstor/scratch/cscs/mkalcher/datasets
 
-# Sweep LR (1e-4 / 2e-4 / 3e-4) x threshold pairs (default / sketch-style / si-blurry)
+# Published Online-LoRA appendix B Table 8: CIFAR-100 mean=2.6, var=0.03.
+# Sweep around that with LR ∈ {1e-4, 2e-4, 3e-4} × thresholds = 9 runs total.
 PIDS=()
 i=0
 for lr in 0.0001 0.0002 0.0003; do
-  for thr in "6.0_0.1" "5.6_0.04" "5.2_0.02"; do
+  for thr in "2.6_0.03" "2.2_0.02" "3.0_0.06"; do
     mean=${thr%_*}
     var=${thr#*_}
     name="lr${lr}_m${mean}_v${var}"
