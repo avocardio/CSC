@@ -2457,6 +2457,43 @@ no value computed only in console gets lost.
   - p3_warmstart_archs.sbatch: csc_bd_ewc_warm K-sweep on R50/R101/CNxT
   - csc_bd_mas implemented in rl/continual_world.py (P4.1) + smoke test
 
+2026-04-29 12:00 | RESULT-POST-FIX | **P5.2 + P5.3 ablations (with bug fix):**
+  csc_bd_ewc_warm (K=5, R18 CIFAR-100):
+    gamma=1e-4: 63.48 ± 2.35  avg_bd=7.97
+    gamma=1e-3: 65.90 (n=1)   avg_bd=7.69    <- best
+    gamma=1e-2: 65.24 (n=1)   avg_bd=4.90
+    gamma=5e-2: 60.31 (n=1)   avg_bd=1.75
+
+  bd_init_scale (gamma=1e-3, K=5):
+    1e-4: 63.81 ± 2.51   1e-2: 63.27 ± 2.62
+    1e-1: 60.82 (n=1)    others incomplete
+
+  CRITICAL: vs EWC alone (72.49 ± 1.32), csc_bd_ewc_warm is ~7pp WORSE at
+  every gamma. The CSC compression mechanism active during EWC training
+  hurts learning, and the bd warm-start doesn't compensate. The earlier
+  "+2pp uplift" finding was the quantize=False bug — those buggy runs
+  were just EWC at K and the 2pp was noise.
+
+  Bottom line: bd warm-start does NOT improve EWC. CSC compression active
+  during CL training imposes ~7pp accuracy cost, and bd-as-Fisher-warmup
+  cannot offset that.
+
+2026-04-29 12:00 | RESULT-POST-FIX | **P1.1 Online-LoRA CIFAR-100 reproduction:**
+  Best config (lr=1e-4, mean=2.6, var=0.03 — matches appendix B):
+    40.44%   (vs published ~48%)
+
+  All 9 configs:
+    lr=1e-4: m2.2/v0.02 -> 39.16   m2.6/v0.03 -> 40.44 (best)   m3.0/v0.06 -> 39.85
+    lr=2e-4: m2.2/v0.02 -> 32.44   m2.6/v0.03 -> 32.91          m3.0/v0.06 -> 10.67
+    lr=3e-4: m2.2/v0.02 -> 15.88   m2.6/v0.03 -> 20.21          m3.0/v0.06 -> 10.99
+
+  LR=1e-4 is the right region. ~8pp gap to published may be due to
+  remaining HP differences. Acceptable for relative comparisons.
+
+  Implication for Exp D (csc_bd vs mas +6.4pp at lr=2e-4):
+  Need to re-verify at lr=1e-4. The lr=2e-4 was suboptimal so the
+  +6.4pp may not transfer.
+
 2026-04-29 11:55 | RESULT-POST-FIX | **P5.1 controls with CSC actually active:**
   ewc (real Fisher)  : 72.49 ± 1.32   bwt -2.23
   csc_bd_ewc         : 46.73 ± 2.88   bwt -38.79   avg_bd 6.38
