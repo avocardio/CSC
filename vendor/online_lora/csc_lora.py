@@ -117,21 +117,22 @@ def wrap_lora_with_csc(lora_model, init_bit_depth: float = 8.0):
     lora_model.wnew_As = nn.ModuleList(new_wnew_As)
     lora_model.wnew_Bs = nn.ModuleList(new_wnew_Bs)
 
-    # Now patch each qkv block's references. The block's qkv module holds
-    # attributes named wnew_a_linear_q, wnew_b_linear_q, wnew_a_linear_v,
-    # wnew_b_linear_v. We fed these in pairs (q-pair, v-pair) when constructing
-    # the model: wnew_As[2k] = a_q, wnew_As[2k+1] = a_v, wnew_Bs[2k] = b_q,
-    # wnew_Bs[2k+1] = b_v.
+    # Patch each qkv block's submodule references. _LoRA_qkv_timm stores its
+    # new-LoRA layers under attributes named linear_new_a_q / linear_new_b_q /
+    # linear_new_a_v / linear_new_b_v (NOT wnew_*). Reassigning via __setattr__
+    # registers our quantized module in nn.Module._modules and removes the
+    # original — without this the original stays reachable through parameters()
+    # and the wnew_* counts double.
     blocks = list(lora_model.lora_vit.blocks)
     pair = 0
     for blk in blocks:
         qkv = blk.attn.qkv
-        if not hasattr(qkv, 'wnew_a_linear_q'):
+        if not hasattr(qkv, 'linear_new_a_q'):
             continue
-        qkv.wnew_a_linear_q = new_wnew_As[2 * pair]
-        qkv.wnew_a_linear_v = new_wnew_As[2 * pair + 1]
-        qkv.wnew_b_linear_q = new_wnew_Bs[2 * pair]
-        qkv.wnew_b_linear_v = new_wnew_Bs[2 * pair + 1]
+        qkv.linear_new_a_q = new_wnew_As[2 * pair]
+        qkv.linear_new_a_v = new_wnew_As[2 * pair + 1]
+        qkv.linear_new_b_q = new_wnew_Bs[2 * pair]
+        qkv.linear_new_b_v = new_wnew_Bs[2 * pair + 1]
         pair += 1
 
     return qlist
