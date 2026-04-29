@@ -2457,6 +2457,36 @@ no value computed only in console gets lost.
   - p3_warmstart_archs.sbatch: csc_bd_ewc_warm K-sweep on R50/R101/CNxT
   - csc_bd_mas implemented in rl/continual_world.py (P4.1) + smoke test
 
+2026-04-29 11:45 | CRITICAL-BUG | All "csc_*_ewc_warm" / "csc_random_ewc" /
+  "csc_magnitude_ewc" runs prior to commit 54faee0 had quantize=False:
+    quantize = args.method in ('csc', 'csc_ewc', 'csc_bd_ewc')   # MISSING!
+  The csc_*_warm / control variants weren't in this set, so the model was
+  built without QuantizedConv2d/QuantizedLinear. Consequences:
+    - soft_protect.acc_bits empty (no quantizers to track)
+    - bd_as_fisher writes nothing to ewc.fisher (empty for-loop)
+    - control_as_fisher (random/magnitude) also writes nothing (same loop)
+    - compression_loss returns 0 (no quantizers)
+
+  This invalidates ALL of:
+    - Exp B "+2pp from bd warm-start" (those runs were just EWC at K)
+    - P5.1 controls (random/magnitude reduce to finetune)
+    - P5.2 gamma sweep (gamma had no effect)
+    - P5.3 bd_scale sweep (bd_scale had no effect)
+    - P3.4 PMNIST warm-start
+
+  Online-LoRA Exp D (csc_bd) is UNAFFECTED — separate codebase, our wrap
+  there is direct (csc_lora.py).
+
+  Fixed in commit 54faee0. Cancelled buggy jobs (1984289 p3_warm,
+  1984299 p3_pmnist, 1984309 p5_1_ctrl) and resubmitted with fix:
+    1984392 p3_warm     (R50/R101/CNxT)
+    1984394 p3_pmnist
+    1984395 p5_abl      (gamma + bd_scale)
+    1984396 p5_1_ctrl   (random/|w| controls)
+  RL p4_bdmas (1984290) was correct from the start (different codebase).
+
+  We need fresh results before claiming the bd warm-start uplift is real.
+
 2026-04-29 11:30 | RESULT | **P5.1 controls — bd is genuinely Fisher-aligned, NOT just any signal.**
   R18 CIFAR-100 t10 (3 seeds each):
     ewc (real Fisher) :         72.49 ± 1.32  bwt -2.23
