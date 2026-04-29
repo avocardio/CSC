@@ -2478,6 +2478,49 @@ no value computed only in console gets lost.
   during CL training imposes ~7pp accuracy cost, and bd-as-Fisher-warmup
   cannot offset that.
 
+2026-04-29 18:05 | RESULT | **P4.2 RL csc_bd_mas — definitive negative result.**
+  cw_subset, 200k steps/task, 3 seeds:
+    csc_bd_mas s42:  25.00%  (hammer=0 push=0 window=0 faucet=1.0)
+    csc_bd_mas s123: 25.00%  (same pattern)
+    csc_bd_mas s789: 25.00%  (same pattern)
+    Mean: 25.00 ± 0.00 — identical seeds, identical pattern.
+
+  vs RL baselines (from earlier sweep):
+    finetune: 24.75 ± 1.22  ← csc_bd_mas matches finetune exactly
+    MAS:      54.75 ± 10.14  ← real importance gives 30pp more
+    EWC:      51.25 ± 15.77
+
+  csc_bd_mas reduces SAC training to pure finetuning. The bit-depth
+  signal as MAS importance provides ZERO forgetting protection in RL.
+
+2026-04-29 18:10 | FINAL-PICTURE | **CSC compression actively hurts CL across all settings tested:**
+
+  Supervised R18 CIFAR-100 EWC:
+    csc_bd_ewc_warm 65.90 vs EWC 72.49        -7pp
+  Supervised ViT-B/16 CIFAR-100 Online-LoRA:
+    csc_bd 14.42 vs mas 29.53                 -15pp
+  Supervised ViT-B/16 ImageNet-R Online-LoRA:
+    csc_bd 1.29 vs mas 35.47                  -34pp (collapse)
+  RL Continual World cw_subset:
+    csc_bd_mas 25.00 vs MAS 54.75             -30pp (= finetune)
+
+  Pattern is consistent and dataset/architecture/domain-independent.
+  Fisher correlation ρ(b, F | |w|) = 0.83 is real and reproducible
+  but does NOT translate to working CL.
+
+  Defensible claims for paper:
+    1. Capacity-efficiency wrapper (csc_ewc 72.04 ≈ EWC 72.49 at 24% bits) —
+       narrow, single-arch, single-dataset.
+    2. Empirical Fisher correlation (ρ=0.83 partial Spearman robust to
+       magnitude) — observation about CSC dynamics, not a CL claim.
+
+  Negative result: training with CSC compression damages representations
+  used by replay/regularization-based CL methods. The compression objective
+  γ·Q + soft-protect's gradient scaling reduces task-fit capacity below the
+  level needed for pretrained-backbone or larger-model CL.
+
+  Not NeurIPS-quality. Workshop or replication-track at best.
+
 2026-04-29 12:00 | RESULT-POST-FIX | **P1.1 Online-LoRA CIFAR-100 reproduction:**
   Best config (lr=1e-4, mean=2.6, var=0.03 — matches appendix B):
     40.44%   (vs published ~48%)
