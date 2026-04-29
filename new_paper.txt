@@ -132,3 +132,45 @@ TODO (high level, ordered)
 8. Statistical rigor: 5 seeds, paired t-tests, error bars on every headline.
 9. Paper rewrite (LAST): abstract, intro (with bio motivation),
    theory section, experiments, related work, conclusions.
+
+KEY FACTS (do not lose during compaction)
+-----------------------------------------
+- Online-LoRA published HPs (appendix B Table 8):
+    CIFAR-100:  mean=2.6,  var=0.03    LR=2e-4 (likely)
+    ImageNet-R: mean=5.2,  var=0.02    LR=2e-4
+    ImageNet-S: mean=5.6,  var=0.06    LR=2e-4
+    CORe50:     mean=6.0,  var=0.1     LR=2e-4
+    CUB-200:    mean=24.0, var=1.0     LR=2e-4
+  λ=2000 for all.
+- Online-LoRA reported baseline numbers on ViT-B/16:
+    CIFAR-100: ~48% Acc@1 (Table 12)
+    ImageNet-R: 48.18 (Table 11)
+    ImageNet-S: 53.75 (Table 9)
+    CORe50: 95.29 (Table 9)
+- Compute env: cluster Clariden, 4 GH200/node, 12h max, account a0155.
+- Datasets staged: cifar100, mnist (in /capstor/scratch/cscs/mkalcher/datasets).
+  Other datasets (imagenet-r, sketch, CUB, CORe50) being downloaded by
+  data_prep job 1984312.
+- All supervised runs save: final_avg, bwt, forgetting, accuracy_matrix,
+  compression.{avg_bit_depth, channel_bit_depths, utilization_8b, ...},
+  config (vars(args)), wall_time. Use analysis/* scripts to aggregate.
+- All Online-LoRA runs save log_*stats.txt with per-task Acc@1 lines like:
+    [Average accuracy till taskN] Acc@1: XX.XXXX  Acc@5: ...
+  Use analysis/olora_summary.py to parse.
+- All RL runs save cw_*_final.json with per-task success and config.
+  Use analysis/rl_summary.py.
+
+JOB IDS LAUNCHED 2026-04-29 (Wave 1+2)
+---------------------------------------
+1984289 p3_warm     R50/R101/CNxT warm-start K-sweep   ~6h GPU
+1984290 p4_bdmas    RL csc_bd_mas cw_subset 5 seeds    ~12h CPU
+1984298 p5_abl      gamma_comp + bd_init_scale sweep   ~6h GPU
+1984299 p3_pmnist   PMNIST MLP warm-start              ~6h GPU
+1984309 p5_1_ctrl   Importance-signal controls         ~4h GPU
+1984312 data_prep   Download Imnet-R/S/CUB/CORe50      ~3h
+1984315 olora_repro CIFAR-100 HP sweep (corrected)     ~4h GPU
+
+NEXT WAVES (queued in scripts/, awaiting data_prep)
+---------------------------------------------------
+p1_olora_imnetr.sbatch   (P1.2 + P2.2)
+TODO: write equivalents for ImageNet-S, CUB, CORe50.
