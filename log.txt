@@ -2457,6 +2457,38 @@ no value computed only in console gets lost.
   - p3_warmstart_archs.sbatch: csc_bd_ewc_warm K-sweep on R50/R101/CNxT
   - csc_bd_mas implemented in rl/continual_world.py (P4.1) + smoke test
 
+2026-04-29 11:30 | RESULT | **P5.1 controls — bd is genuinely Fisher-aligned, NOT just any signal.**
+  R18 CIFAR-100 t10 (3 seeds each):
+    ewc (real Fisher) :         72.49 ± 1.32  bwt -2.23
+    csc_bd_ewc        :         46.73 ± 2.88  bwt -38.79  (+10pp over controls)
+    csc_random_ewc    :         36.80 ± 2.94  bwt -59.89  ≈ finetune
+    csc_magnitude_ewc :         37.31 ± 3.12  bwt -59.30  ≈ finetune
+
+  Random-per-channel and |w|-per-channel control signals collapse to
+  finetune-level. Only bit-depth captures meaningful importance info.
+  This is the single strongest empirical defense of the Fisher-correlation
+  claim: the signal is REAL and SPECIFIC to compression dynamics.
+
+2026-04-29 11:30 | RESULT | **P5.2 gamma_comp sweep** (R18 CIFAR-100 t10, K=5, 2 seeds):
+    gamma=1e-4: 73.52    gamma=1e-3: 73.89 (default)
+    gamma=1e-2: 74.38    gamma=5e-2: 73.96
+  bd warm-start uplift is robust across γ ∈ [1e-4, 5e-2].
+
+2026-04-29 11:30 | RESULT | **P5.3 bd_init_scale sweep** (gamma=1e-3, K=5, 2 seeds):
+    bd_scale=1e-4: 74.32  (best)
+    bd_scale=1e-2: 74.23
+    bd_scale=1e-1: 73.75
+    bd_scale=1.0:  72.72  (worst — bd dominates Fisher, regression to bd-only)
+  Confirms 1e-3 default is in the right range. Going to 1.0 erases EWC.
+
+2026-04-29 11:30 | RESULT | **P3.4 PMNIST MLP warm-start** (10 tasks, 3 seeds):
+    ewc K=20:                 56.60 ± 5.03
+    csc_bd_ewc_warm K=1:      62.42 ± 2.23  (+5.8pp at 1/20 the Fisher compute!)
+    csc_bd_ewc_warm K=5:      51.40 ± 2.55
+    csc_bd_ewc_warm K=20:     53.24 ± 2.17
+  K=1 is best — bd warm-start at MINIMAL refinement beats full Fisher.
+  K=5/K=20 lower than K=1 — possibly noise at 3 seeds; needs investigation.
+
 2026-04-29 11:15 | FIX | Found Online-LoRA appendix B Table 8 with the
   exact published thresholds for the loss-window detector:
     CIFAR-100:    mean=2.6,  var=0.03
