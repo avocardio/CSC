@@ -2457,6 +2457,24 @@ no value computed only in console gets lost.
   - p3_warmstart_archs.sbatch: csc_bd_ewc_warm K-sweep on R50/R101/CNxT
   - csc_bd_mas implemented in rl/continual_world.py (P4.1) + smoke test
 
+2026-04-29 11:55 | RESULT-POST-FIX | **P5.1 controls with CSC actually active:**
+  ewc (real Fisher)  : 72.49 ± 1.32   bwt -2.23
+  csc_bd_ewc         : 46.73 ± 2.88   bwt -38.79   avg_bd 6.38
+  csc_magnitude_ewc  : 44.86 ± 1.16   bwt -40.74   avg_bd 6.38   <-- new fixed
+  csc_random_ewc     : 43.60 ± 2.04   bwt -42.14   avg_bd 6.39   <-- new fixed
+
+  bd-vs-controls gap ~ 2-3pp (not 10pp as buggy version showed). The biggest
+  uplift comes from EWC-regularization-mechanism + CSC compression itself
+  (~8pp over CSC-alone 36%); bd contributes additional 2-3pp over
+  random/magnitude controls.
+
+  Implication: "bd uniquely captures Fisher" is weaker than I'd hoped.
+  The signal is ABOVE-random but the contrast is muted. Need more seeds
+  (current is 3) to claim the 2-3pp gap is significant.
+
+  Real Fisher EWC (72%) still vastly outperforms any CSC variant. The
+  gap to real Fisher (~25pp) cannot be closed by CSC's importance signal.
+
 2026-04-29 11:45 | CRITICAL-BUG | All "csc_*_ewc_warm" / "csc_random_ewc" /
   "csc_magnitude_ewc" runs prior to commit 54faee0 had quantize=False:
     quantize = args.method in ('csc', 'csc_ewc', 'csc_bd_ewc')   # MISSING!
