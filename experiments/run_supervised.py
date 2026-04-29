@@ -176,6 +176,41 @@ class SoftProtect:
                 W.grad.mul_(scale.view(-1, 1))               # Linear (O, I)
 
 
+def control_as_fisher(soft_protect: 'SoftProtect', ewc: 'EWCRegularizer',
+                      kind: str, seed: int = 0):
+    """csc_*_ewc control variants: P5.1 ablation.
+    Replace the empirical Fisher with one of:
+       'random'    — per-channel random importance ∈ [0,1] (seeded reproducibly).
+       'magnitude' — per-channel max|weight| (post-training).
+    Same structure as bd_as_fisher: snapshot params, broadcast over fan-in."""
+    import torch as _torch
+    g = _torch.Generator(device=DEVICE).manual_seed(seed)
+    ewc._snapshot_params()
+    name_to_module = {n: m for n, m in soft_protect.model.named_modules()}
+    for mod_name, acc in soft_protect.acc_bits.items():
+        m = name_to_module.get(mod_name)
+        if m is None:
+            continue
+        W = _module_weight(m)
+        for pname, p in soft_protect.model.named_parameters():
+            if p is W:
+                break
+        else:
+            continue
+        if kind == 'random':
+            sig = _torch.rand(acc.shape, generator=g, device=acc.device).clamp(min=1e-8)
+        elif kind == 'magnitude':
+            flat = W.detach().reshape(W.shape[0], -1).abs()
+            sig = flat.amax(dim=1).clamp(min=1e-8)
+        else:
+            raise ValueError(kind)
+        if W.dim() == 4:
+            f = sig.view(-1, 1, 1, 1).expand_as(W).contiguous()
+        else:
+            f = sig.view(-1, 1).expand_as(W).contiguous()
+        ewc.fisher[pname] = ewc.fisher.get(pname, _torch.zeros_like(f)) + f
+
+
 def bd_as_fisher(soft_protect: 'SoftProtect', ewc: 'EWCRegularizer'):
     """csc_bd_ewc helper: copy CSC's accumulated per-channel bit-depths into
     EWCRegularizer.fisher (broadcast over fan-in), and snapshot params. Used in
@@ -437,7 +472,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--method', required=True,
                    choices=['finetune', 'replay', 'der', 'ewc', 'packnet', 'csc',
-                            'csc_ewc', 'csc_bd_ewc', 'csc_bd_ewc_warm'])
+                            'csc_ewc', 'csc_bd_ewc', 'csc_bd_ewc_warm',
+                            'csc_random_ewc', 'csc_magnitude_ewc'])
     p.add_argument('--num_tasks', type=int, default=10)
     p.add_argument('--epochs_per_task', type=int, default=50)
     p.add_argument('--batch_size', type=int, default=128)
@@ -537,11 +573,15 @@ def main():
     # csc_bd_ewc_warm: bd initialises EWC's fisher (scaled), then refine with K
     #                  batches of empirical Fisher on top — quantifies how cheap
     #                  Fisher refinement gets when warm-started from bd.
-    use_ewc = args.method in ('ewc', 'csc_ewc', 'csc_bd_ewc', 'csc_bd_ewc_warm')
+    use_ewc = args.method in ('ewc', 'csc_ewc', 'csc_bd_ewc', 'csc_bd_ewc_warm',
+                              'csc_random_ewc', 'csc_magnitude_ewc')
     use_pn = args.method == 'packnet'
-    use_csc = args.method in ('csc', 'csc_ewc', 'csc_bd_ewc', 'csc_bd_ewc_warm')
+    use_csc = args.method in ('csc', 'csc_ewc', 'csc_bd_ewc', 'csc_bd_ewc_warm',
+                              'csc_random_ewc', 'csc_magnitude_ewc')
     use_bd_ewc = args.method == 'csc_bd_ewc'
     use_bd_ewc_warm = args.method == 'csc_bd_ewc_warm'
+    use_random_ewc = args.method == 'csc_random_ewc'
+    use_magnitude_ewc = args.method == 'csc_magnitude_ewc'
 
     replay = ReplayBuffer(device) if use_replay else None
     soft = SoftProtect(model, beta=args.soft_beta) if use_csc else None
@@ -576,7 +616,11 @@ def main():
                             store_logits=use_der)
         if use_csc:
             soft.on_task_end()
-        if use_bd_ewc:
+        if use_random_ewc:
+            control_as_fisher(soft, ewc, 'random', seed=args.seed + task_id)
+        elif use_magnitude_ewc:
+            control_as_fisher(soft, ewc, 'magnitude')
+        elif use_bd_ewc:
             # bd as Fisher proxy, no real Fisher pass.
             bd_as_fisher(soft, ewc)
         elif use_bd_ewc_warm:
