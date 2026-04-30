@@ -162,12 +162,13 @@ class SoftProtect:
     @torch.no_grad()
     def revive_low_bd_channels(self, threshold: float, init_bit_depth: float = 8.0,
                                init_exponent: float = -4.0) -> int:
-        """Reset channels with bit-depth below `threshold` so the next task can
-        use them as fresh capacity. Resets:
-          - quantizer.bit_depth (back to init)
-          - quantizer.exponent  (back to init)
-          - the corresponding weight rows (kaiming re-init)
-          - acc_bits entry (so soft-protect doesn't lock the revived channel)
+        """Reset channels that are CURRENTLY low AND were NEVER important.
+
+        Selectivity: a channel is revived only if both
+          - bd_current < threshold  (low after this task), and
+          - acc_bits   < threshold  (low across ALL prior tasks too)
+        The acc_bits check protects channels that were specialists for any
+        prior task — those keep their learned representations.
         Returns the total number of channels revived across the model."""
         import math
         revived = 0
@@ -175,7 +176,7 @@ class SoftProtect:
             if name not in self.acc_bits:
                 continue
             bd = m.quantizer.get_channel_bit_depths().detach().clamp(min=0)
-            mask = bd < threshold
+            mask = (bd < threshold) & (self.acc_bits[name] < threshold)
             n = int(mask.sum().item())
             if n == 0:
                 continue
