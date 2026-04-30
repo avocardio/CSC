@@ -679,10 +679,6 @@ def main():
                 if _is_quantized_module(m):
                     snap[name] = m.quantizer.get_channel_bit_depths().detach().clamp(min=0).cpu().tolist()
             bd_trajectories.append(snap)
-            # Revive low-bit-depth channels so next task can use them.
-            if args.bd_revive_threshold > 0 and task_id < args.num_tasks - 1:
-                n = soft.revive_low_bd_channels(args.bd_revive_threshold)
-                print(f'  CSC: revived {n} channels (bd < {args.bd_revive_threshold})', flush=True)
         if use_random_ewc:
             control_as_fisher(soft, ewc, 'random', seed=args.seed + task_id)
         elif use_magnitude_ewc:
@@ -707,6 +703,13 @@ def main():
         for j, a in enumerate(accs):
             print(f'  Task {j}: {a*100:.1f}%')
         print(f'  AvgSeen: {cl_metrics.average_accuracy(task_id)*100:.2f}%', flush=True)
+
+        # Revive low-bd channels AFTER the eval — the just-trained task's
+        # accuracy is captured cleanly, and the next task starts with the
+        # revived (free) capacity.
+        if use_csc and args.bd_revive_threshold > 0 and task_id < args.num_tasks - 1:
+            n = soft.revive_low_bd_channels(args.bd_revive_threshold)
+            print(f'  CSC: revived {n} channels (bd < {args.bd_revive_threshold})', flush=True)
 
     cl_metrics.print_matrix()
     if use_csc:
