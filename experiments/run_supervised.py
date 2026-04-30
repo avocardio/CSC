@@ -161,14 +161,25 @@ class SoftProtect:
 
     @torch.no_grad()
     def revive_low_bd_channels(self, threshold: float, init_bit_depth: float = 8.0,
-                               init_exponent: float = -4.0) -> int:
+                               init_exponent: float = -4.0,
+                               reset_weights: bool = False) -> int:
         """Reset channels that are CURRENTLY low AND were NEVER important.
 
         Selectivity: a channel is revived only if both
           - bd_current < threshold  (low after this task), and
-          - acc_bits   < threshold  (low across ALL prior tasks too)
-        The acc_bits check protects channels that were specialists for any
-        prior task — those keep their learned representations.
+          - acc_bits   < threshold  (low across ALL prior tasks too).
+
+        Default behaviour (`reset_weights=False`, GENTLE):
+          - bump bit-depth back up to init (channel gets full precision again)
+          - reset acc_bits so soft-protect doesn't keep it semi-locked
+          - KEEP the learned weight values (they're the model's current best
+            for this channel; future training will refine, not start over).
+
+        Aggressive (`reset_weights=True`):
+          - also kaiming-reinit the weight rows.
+          - destroys representation; only useful if the channel is genuinely
+            ballast (weights near zero from heavy quantisation).
+
         Returns the total number of channels revived across the model."""
         import math
         revived = 0
@@ -181,20 +192,18 @@ class SoftProtect:
             if n == 0:
                 continue
             revived += n
-            # Reset quantizer state on those channels
             m.quantizer.bit_depth.data[mask] = init_bit_depth
             m.quantizer.exponent.data[mask] = init_exponent
-            # Reset weights for those channels (kaiming, matching upstream init).
-            W = _module_weight(m)
-            if W.dim() == 4:
-                fan = W.shape[1] * W.shape[2] * W.shape[3]
-                std = math.sqrt(2.0 / fan)
-                W.data[mask] = torch.randn_like(W.data[mask]) * std
-            else:
-                fan = W.shape[1]
-                bound = math.sqrt(1.0 / fan)
-                W.data[mask] = torch.empty_like(W.data[mask]).uniform_(-bound, bound)
-            # Reset acc_bits so soft-protect doesn't keep these channels semi-locked.
+            if reset_weights:
+                W = _module_weight(m)
+                if W.dim() == 4:
+                    fan = W.shape[1] * W.shape[2] * W.shape[3]
+                    std = math.sqrt(2.0 / fan)
+                    W.data[mask] = torch.randn_like(W.data[mask]) * std
+                else:
+                    fan = W.shape[1]
+                    bound = math.sqrt(1.0 / fan)
+                    W.data[mask] = torch.empty_like(W.data[mask]).uniform_(-bound, bound)
             self.acc_bits[name][mask] = 0.0
         return revived
 
