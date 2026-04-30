@@ -159,6 +159,44 @@ class SoftProtect:
             b = m.quantizer.get_channel_bit_depths().detach().clamp(min=0)
             self.acc_bits[name] = torch.max(self.acc_bits[name], b)
 
+    @torch.no_grad()
+    def revive_low_bd_channels(self, threshold: float, init_bit_depth: float = 8.0,
+                               init_exponent: float = -4.0) -> int:
+        """Reset channels with bit-depth below `threshold` so the next task can
+        use them as fresh capacity. Resets:
+          - quantizer.bit_depth (back to init)
+          - quantizer.exponent  (back to init)
+          - the corresponding weight rows (kaiming re-init)
+          - acc_bits entry (so soft-protect doesn't lock the revived channel)
+        Returns the total number of channels revived across the model."""
+        import math
+        revived = 0
+        for name, m in self.model.named_modules():
+            if name not in self.acc_bits:
+                continue
+            bd = m.quantizer.get_channel_bit_depths().detach().clamp(min=0)
+            mask = bd < threshold
+            n = int(mask.sum().item())
+            if n == 0:
+                continue
+            revived += n
+            # Reset quantizer state on those channels
+            m.quantizer.bit_depth.data[mask] = init_bit_depth
+            m.quantizer.exponent.data[mask] = init_exponent
+            # Reset weights for those channels (kaiming, matching upstream init).
+            W = _module_weight(m)
+            if W.dim() == 4:
+                fan = W.shape[1] * W.shape[2] * W.shape[3]
+                std = math.sqrt(2.0 / fan)
+                W.data[mask] = torch.randn_like(W.data[mask]) * std
+            else:
+                fan = W.shape[1]
+                bound = math.sqrt(1.0 / fan)
+                W.data[mask] = torch.empty_like(W.data[mask]).uniform_(-bound, bound)
+            # Reset acc_bits so soft-protect doesn't keep these channels semi-locked.
+            self.acc_bits[name][mask] = 0.0
+        return revived
+
     def scale_grads(self):
         if self.beta <= 0:
             return
@@ -495,6 +533,9 @@ def main():
     p.add_argument('--ewc_lambda', type=float, default=1000.0)
     p.add_argument('--ewc_n_batches', type=int, default=20,
                    help='Batches used for empirical Fisher pass (default 20).')
+    p.add_argument('--bd_revive_threshold', type=float, default=0.0,
+                   help='If > 0, channels with bit-depth below this threshold are '
+                        're-initialised at task end (free capacity for next task).')
     p.add_argument('--bd_init_scale', type=float, default=1e-3,
                    help='Scale factor when initialising EWC fisher from bit-depth '
                         '(csc_bd_ewc_warm). Brings bd values close to typical '
@@ -628,6 +669,10 @@ def main():
                 if _is_quantized_module(m):
                     snap[name] = m.quantizer.get_channel_bit_depths().detach().clamp(min=0).cpu().tolist()
             bd_trajectories.append(snap)
+            # Revive low-bit-depth channels so next task can use them.
+            if args.bd_revive_threshold > 0 and task_id < args.num_tasks - 1:
+                n = soft.revive_low_bd_channels(args.bd_revive_threshold)
+                print(f'  CSC: revived {n} channels (bd < {args.bd_revive_threshold})', flush=True)
         if use_random_ewc:
             control_as_fisher(soft, ewc, 'random', seed=args.seed + task_id)
         elif use_magnitude_ewc:
