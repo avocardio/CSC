@@ -591,6 +591,11 @@ def main():
                       retrain_epochs=args.retrain_epochs) if use_pn else None
     cl_metrics = CLMetrics(args.num_tasks)
     t0 = time.time()
+    # Per-task bit-depth trajectories: list of {layer_name: list[float]} per task end.
+    # Captures the actual end-of-task bit-depth (not the running max in soft.acc_bits)
+    # so we can plot trajectories — does any channel rise specifically on task k,
+    # then get reused (rise again differently) on task k+1?
+    bd_trajectories: list[dict] = []
 
     for task_id in range(args.num_tasks):
         print(f'\n{"=" * 50}\nTASK {task_id}\n{"=" * 50}', flush=True)
@@ -617,6 +622,12 @@ def main():
                             store_logits=use_der)
         if use_csc:
             soft.on_task_end()
+            # Snapshot per-channel bit-depth at end of this task.
+            snap = {}
+            for name, m in model.named_modules():
+                if _is_quantized_module(m):
+                    snap[name] = m.quantizer.get_channel_bit_depths().detach().clamp(min=0).cpu().tolist()
+            bd_trajectories.append(snap)
         if use_random_ewc:
             control_as_fisher(soft, ewc, 'random', seed=args.seed + task_id)
         elif use_magnitude_ewc:
@@ -668,6 +679,7 @@ def main():
     }
     if use_csc:
         out['compression'] = stats
+        out['bd_trajectories'] = bd_trajectories
     with open(out_path, 'w') as f:
         json.dump(out, f, indent=2)
     print(f'Saved: {out_path}', flush=True)
