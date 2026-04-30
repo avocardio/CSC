@@ -2493,6 +2493,28 @@ no value computed only in console gets lost.
   csc_bd_mas reduces SAC training to pure finetuning. The bit-depth
   signal as MAS importance provides ZERO forgetting protection in RL.
 
+2026-04-30 20:50 | RESULT | **CHANNEL REVIVAL WORKS.**
+  At task end, channels with bd_current < threshold AND acc_bits < threshold
+  get bit-depth bumped back to init (gentle: keep weights).
+
+  γ=0.05 + revive_threshold=4.0 (1 seed, R18 CIFAR-100, 50 epochs/task):
+    final_avg = 78.76%       (≈ baseline 79.00% at γ=0.001)
+    compression = 8.0% bits  (vs baseline 20% — 2.5x more compressed)
+    avg_bd = 2.57            (vs baseline 6.41)
+    Non-monotone channels (drop>0.5 then rise>0.5): 1440/3840 = 37.5%
+    Channels w/ bd std > 1.0 across tasks: 77 (vs baseline 1)
+    Channels w/ bd std > 2.0: 16 (vs baseline 0)
+
+  The "smart bit allocation across tasks" hypothesis is empirically
+  supported in this single-seed result. Compression dynamics push
+  unused channels to low bd; the revival mechanism resets their
+  precision (gentle: keeping weights); the next task uses the freed
+  capacity to consolidate via replay+DER.
+
+  Diagonal A[k,k]: 10, 9.5, 10.4, 15.8, 12, 51.2, 19.6, 31.7, 42.9, 92.9
+  Final row A[9, *]: 63.1, 70.4, 65.0, 73.7, 80.1, 79.3, 84.0, 90.3, 88.8, 92.9
+  Model relearns each task progressively as capacity is redistributed.
+
 2026-04-29 18:10 | FINAL-PICTURE | **CSC compression actively hurts CL across all settings tested:**
 
   Supervised R18 CIFAR-100 EWC:
